@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 
-import { DEFAULT_API_BASE, SESSION_KEY, resolveApiBase } from "../lib/api-base";
+import { DEFAULT_API_BASE, SESSION_KEY, isInsecureBase, resolveApiBase } from "../lib/api-base";
 
 type Counts = Record<string, number>;
 
@@ -53,11 +53,22 @@ export default function Graph({
   tools = false,
   theme = "light",
   apiParam,
+  apiBase: baseOverride,
 }: {
   tools?: boolean;
   theme?: string;
-  /** widget `?api=` param; seeds the sessionStorage override on mount */
+  /**
+   * `?api=` URL param; seeds the sessionStorage override on mount. No route
+   * forwards this: the widget must ignore `?api=` because it is embeddable
+   * cross-origin, and a framed override would aim the visitor's PAT at any
+   * host the framer picks.
+   */
   apiParam?: string;
+  /**
+   * Pins the API base (test seam); defaults to the resolved
+   * session → build-time env → default chain.
+   */
+  apiBase?: string;
 }) {
   const days = useMemo(lastYear, []);
   const [pat, setPat] = useState("");
@@ -78,10 +89,11 @@ export default function Graph({
   const [attempt, setAttempt] = useState(0);
 
   const envBase = process.env.NEXT_PUBLIC_GITLARP_API_URL || DEFAULT_API_BASE;
-  const apiBase = useMemo(
+  const resolvedBase = useMemo(
     () => resolveApiBase({ session: apiInput, env: process.env.NEXT_PUBLIC_GITLARP_API_URL }),
     [apiInput]
   );
+  const apiBase = baseOverride ?? resolvedBase;
 
   useEffect(() => {
     if (apiParam) store(SESSION_KEY, apiParam);
@@ -227,6 +239,12 @@ export default function Graph({
           value={pat}
           onChange={(e) => setPat(e.target.value)}
         />
+        <p className="hint">PAT will be sent to: {apiBase}</p>
+        {isInsecureBase(apiBase) && (
+          <p style={{ color: theme === "dark" ? "#d29922" : "#9a6700" }}>
+            Warning: this API base is not HTTPS — your PAT would be sent in cleartext
+          </p>
+        )}
         <label htmlFor="gitlarp-api-url">API URL</label>
         <input
           id="gitlarp-api-url"

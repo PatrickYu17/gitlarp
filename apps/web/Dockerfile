@@ -1,8 +1,6 @@
 # gitlarp web UI: one-click Docker deploy.
 # Build context is the repo root (see docker-compose.yml).
 
-ARG NEXT_PUBLIC_GITLARP_API_URL
-
 FROM oven/bun:1 AS build
 WORKDIR /app
 # Next.js shells out to `npm config get registry` when downloading the swc
@@ -26,5 +24,14 @@ COPY --from=build /app/node_modules node_modules
 COPY --from=build /app/package.json package.json
 COPY --from=build /app/apps/web apps/web
 WORKDIR /app/apps/web
+# Unprivileged runtime user, mirroring apps/server/Dockerfile. /app is
+# chowned because `next start` writes cache files under .next at runtime.
+RUN useradd --create-home --shell /usr/sbin/nologin app \
+    && chown -R app:app /app
+USER app
 EXPOSE 3000
+# The image ships no curl/wget, so probe with bun's own fetch (docker-smoke.sh
+# does the same check via `GET /` on :3000).
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+    CMD bun -e 'fetch("http://127.0.0.1:3000/").then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))'
 CMD ["bun", "run", "start"]
