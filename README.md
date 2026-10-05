@@ -225,7 +225,7 @@ decrypts). CORS `*`.
 
 ## Gates + CI
 
-- `bash scripts/gates.sh`: prints the resource-budget table (CLI binary < 512000 B, CLI startup < 5 ms, web first-load JS < 100 KB gzipped, worker bundle < 1 MB) and exits 1 on any red row
+- `bash scripts/gates.sh`: prints the resource-budget table (CLI binary < 512000 B on macOS / 560000 B on Linux, CLI startup < 5 ms, web first-load JS < 100 KB gzipped, worker bundle < 1 MB) and exits 1 on any red row
 - `bash scripts/docker-smoke.sh`: builds the compose stack (server + web) and probes `/healthz`, the web UI, and the API end to end; runs as its own compose project on remapped ports (39080/39000), so it is safe next to a live deployment; run before a release
 - `.github/workflows/ci.yml`: web build + tests, `cargo test --workspace` (core, CLI, server), a wasm32 check plus host tests of `apps/worker`, and gates on every push and PR
 - `.github/workflows/smoke.yml`: manual or monthly live smoke against a real account; needs secrets `SMOKE_PAT`, `SMOKE_LOGIN`, optional `SMOKE_WORKER_URL`

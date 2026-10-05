@@ -14,15 +14,20 @@ row() {
 }
 
 BIN=target/release/gitlarp
+# The same source measures ~17% larger as a Linux ELF than a macOS
+# Mach-O, so the size budget is per-OS (calibrated: darwin ~455KB,
+# linux ~535KB; keep headroom for toolchain drift).
+cli_limit=512000
+[ "$(uname -s)" = "Linux" ] && cli_limit=560000
 if [ -x "$BIN" ]; then
   size=$(wc -c < "$BIN" | tr -d ' ')
-  if awk -v s="$size" 'BEGIN { exit !(s < 512000) }'; then
-    row cli-binary "${size}B" "512000B" PASS
+  if awk -v s="$size" -v l="$cli_limit" 'BEGIN { exit !(s < l) }'; then
+    row cli-binary "${size}B" "${cli_limit}B" PASS
   else
-    row cli-binary "${size}B" "512000B" FAIL
+    row cli-binary "${size}B" "${cli_limit}B" FAIL
   fi
 else
-  row cli-binary missing "512000B" FAIL
+  row cli-binary missing "${cli_limit}B" FAIL
   echo "hint: cargo build --release (in apps/cli)"
 fi
 
