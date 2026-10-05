@@ -9,6 +9,6 @@ tokio = { version = "1", features = ["rt", "time", "net", "sync"] }
 gitlarp-core = { path = "../core" }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 serde_json = "1"
-getrandom = "0.2"
+getrandom = "0.4"
 env_logger = "0.11"
 log = "0.4"
