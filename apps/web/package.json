@@ -16,7 +16,9 @@
   },
   "optionalDependencies": {
     "@next/swc-linux-x64-gnu": "16.3.2",
-    "@next/swc-linux-arm64-gnu": "16.3.2"
+    "@next/swc-linux-arm64-gnu": "16.3.2",
+    "@ast-grep/napi-linux-x64-gnu": "0.40.5",
+    "@esbuild/linux-x64": "0.25.4"
   },
   "devDependencies": {
     "@opennextjs/cloudflare": "^1.20.2",

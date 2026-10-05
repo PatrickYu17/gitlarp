@@ -21,7 +21,16 @@ const BASE_CSP = [
 const frameAncestors = (path: string) =>
   path === "/widget" ? "frame-ancestors *" : "frame-ancestors 'self'";
 
-export function proxy(request: NextRequest) {
+// Deliberately the legacy `middleware.ts` convention, not Next 16's
+// `proxy.ts`: proxy.ts is forced onto the Node.js runtime by the
+// compiler, and @opennextjs/cloudflare (1.20.x) only supports Edge
+// middleware — a proxy.ts app fails its build with "Node.js
+// middleware is not currently supported". The body is fully
+// edge-compatible (headers only). Rename back to proxy.ts when the
+// adapter ships Node middleware support
+// (opennextjs/opennextjs-cloudflare#617).
+
+export function middleware(request: NextRequest) {
   return NextResponse.next({
     headers: {
       "Content-Security-Policy": [
