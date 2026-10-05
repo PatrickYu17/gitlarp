@@ -1,0 +1,9 @@
+node_modules
+**/.next
+**/.open-next
+**/.wrangler
+**/target
+**/data
+.git
+.gitlarp
+*.log

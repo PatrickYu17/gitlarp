@@ -1,0 +1,14 @@
+{
+  "name": "gitlarp",
+  "private": true,
+  "packageManager": "bun@1.4.0",
+  "workspaces": ["apps/*"],
+  "trustedDependencies": ["workerd"],
+  "scripts": {
+    "build": "bun run --filter '*' build",
+    "test": "bun run --filter '*' test",
+    "dev": "bun run --filter gitlarp-web dev",
+    "deploy-web": "bun run --filter gitlarp-web deploy",
+    "install-cli": "bun run --filter gitlarp-cli install-cli"
+  }
+}

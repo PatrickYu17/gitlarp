@@ -1,0 +1,24 @@
+name: smoke
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 6 1 * *"
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+      - uses: dtolnay/rust-toolchain@stable
+      - run: bun install --frozen-lockfile
+      - name: Build CLI (release)
+        working-directory: apps/cli
+        run: cargo build --release
+      - name: Live smoke
+        run: bash scripts/smoke.sh
+        env:
+          SMOKE_PAT: ${{ secrets.SMOKE_PAT }}
+          SMOKE_LOGIN: ${{ secrets.SMOKE_LOGIN }}
+          SMOKE_WORKER_URL: ${{ secrets.SMOKE_WORKER_URL }}

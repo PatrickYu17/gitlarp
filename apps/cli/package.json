@@ -1,0 +1,9 @@
+{
+  "name": "gitlarp-cli",
+  "private": true,
+  "scripts": {
+    "build": "cargo build --release",
+    "test": "cargo test",
+    "install-cli": "cargo install --path ."
+  }
+}

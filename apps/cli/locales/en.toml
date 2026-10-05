@@ -1,0 +1,114 @@
+# gitlarp CLI English locale. All user-facing text lives here;
+# code refers to keys via t!("key") / t!("key", name = value).
+
+usage = [
+  "gitlarp: LARP your GitHub contribution graph",
+  "",
+  "  gitlarp init                                  create private gitlarp-history repo + config",
+  "  gitlarp day <YYYY-MM-DD> <n>                  n commits on one day",
+  "  gitlarp fill --from <YYYY-MM-DD> --to <YYYY-MM-DD> [--min n] [--max n]",
+  "  gitlarp schedule                              show schedule + status",
+  "  gitlarp schedule --min n --max n [--from <YYYY-MM-DD>] [--to <YYYY-MM-DD>]",
+  "                    [--no-weekends] [--catch-up n]",
+  "  gitlarp schedule --off                        remove the schedule",
+  "  gitlarp cron                                  run due scheduled commits now",
+  "  gitlarp cron --install                        install daily launchd/crontab entry",
+  "  gitlarp cron --uninstall                      remove the scheduler entry",
+  "  gitlarp wipe                                  reset the repo to gitlarp-base (undo all larp commits)",
+  "",
+  "flags:",
+  "  --force    allow out-of-window dates and up to 1000 commits/day",
+  "  --dry-run  print the plan without committing",
+  "",
+  "requires: gh CLI installed and authenticated (gh auth login)",
+  "",
+  "env:",
+  "  GITLARP_HOME   config dir (default ~/.gitlarp)",
+  "  GITLARP_REPO   repo name (default gitlarp-history)",
+]
+
+# errors
+err.prefix = "error: {e}"
+err.day_usage = "usage: gitlarp day <date> <n>"
+err.missing_count = "missing commit count"
+err.bad_count = "bad commit count"
+err.missing_value = "missing value for {flag}"
+err.unknown_flag = "unknown flag {flag}"
+err.bad_min = "bad --min"
+err.bad_max = "bad --max"
+err.bad_catchup = "bad --catch-up"
+err.missing_from = "missing --from"
+err.missing_to = "missing --to"
+err.from_after_to = "--from is after --to"
+err.min_over_max = "--min is greater than --max"
+err.span_over_cap = "{span} days is over the hard cap of {limit} days per run"
+err.gh_token = "could not get a GitHub token. Is gh installed and authenticated? (gh auth login)"
+err.no_gh = "gh CLI not found. Install it, then: gh auth login; gitlarp init"
+err.nothing_to_wipe = "nothing to wipe (no gitlarp-base, no remote branch)"
+err.sched_needs_minmax = "schedule needs --min and --max"
+err.no_schedule = "no schedule: run gitlarp schedule --min 1 --max 4 first"
+err.exe = "cannot find gitlarp binary: {e}"
+err.no_home = "no HOME"
+err.launchctl_run = "failed to run launchctl: {e}"
+err.launchctl_load = "launchctl load failed"
+err.crontab_run = "failed to run crontab: {e}"
+err.no_stdin = "no stdin"
+err.crontab_install = "crontab install failed"
+err.unsupported_install = "cron --install only supports macOS and Linux"
+err.unsupported_uninstall = "cron --uninstall only supports macOS and Linux"
+
+# warnings / notes
+warn.clamped = "clamped {n} date(s) to the rolling 12-month window (--force overrides)"
+warn.outside = "warning: {n} date(s) outside the rolling 12-month window will NOT count on the graph"
+warn.catchup = "warning: {n} day(s) older than the catch-up window of {cap} stay empty"
+warn.partial = "warning: partial run: {e}"
+warn.private = "if commits don't appear on the graph: enable Private contributions at https://github.com/settings/profile"
+warn.unsigned = "commits are unsigned; GitHub shows them as Unverified"
+
+# status / info
+info.dry_day = "{date}  x{n}"
+info.dry_summary = "dry-run: {total} commit(s) on {days} day(s) would be created"
+info.created = "created {made} commit(s)"
+info.init_done = "init done: repo {repo} (private), config at {path}"
+info.init_next = "next: gitlarp day <YYYY-MM-DD> <n>"
+info.wiped = "wiped: reset the branch to gitlarp-base ({sha})"
+info.wiped_empty = "wiped: no gitlarp-base (the repo was empty when larping started); deleted origin/{branch}"
+info.no_schedule_status = "no schedule. Set one: gitlarp schedule --min 1 --max 4"
+info.nothing_to_off = "no schedule configured (nothing to turn off)"
+info.schedule_off = "schedule off"
+info.schedule_set = "schedule {state}; commits start tomorrow (today is not backfilled)"
+info.state_updated = "updated"
+info.state_enabled = "enabled"
+info.sched_line = "schedule: {min}-{max} commits/day, weekends {weekends}, from {from}, to {to}"
+info.weekends_included = "included"
+info.weekends_excluded = "excluded"
+info.catchup = "catch-up: up to {n} missed day(s)"
+info.last_run = "last run: {date}"
+info.last_run_never = "last run: never"
+info.next_due = "next due: {date}"
+info.next_due_none = "next due: none (schedule ended, or check --from/--to)"
+info.cron_installed = "cron: installed"
+info.cron_not_installed = "cron: not installed (gitlarp cron --install)"
+info.nothing_due_today = "nothing due today (next: {date})"
+info.nothing_due = "nothing due (schedule ended, or check --from/--to)"
+info.installed_macos = "installed: daily at 12:{minute}, also on login; logs at {log}"
+info.installed_linux = "installed: daily at 12:{minute}; logs at {log}"
+info.no_launchd = "no launchd entry to remove"
+info.uninstalled_launchd = "uninstalled: removed {path}"
+info.no_crontab = "no crontab entry to remove"
+info.uninstalled_crontab = "uninstalled: removed the # gitlarp crontab line"
+
+# config file errors
+cfg.read = "config {path}: {e}"
+cfg.badline = "config {path} line {line}: expected key = \"value\""
+cfg.bad = "config {path} line {line}: {msg}"
+cfg.bad_min = "bad schedule_min {v}"
+cfg.bad_max = "bad schedule_max {v}"
+cfg.bad_weekends = "bad schedule_weekends {v} (want true/false)"
+cfg.bad_catchup = "bad schedule_catchup {v}"
+cfg.sched_minmax = "config {path}: schedule needs schedule_min and schedule_max (both >= 1)"
+cfg.sched_order = "config {path}: schedule_min is greater than schedule_max"
+
+# state file errors
+state.read = "state {path}: {e}"
+state.bad = "state {path}: bad format (want `last = \"YYYY-MM-DD\"`)"

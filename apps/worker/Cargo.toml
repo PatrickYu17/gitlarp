@@ -1,0 +1,18 @@
+[package]
+name = "gitlarp-worker"
+version = "0.2.0"
+edition = "2021"
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+worker = { version = "0.6", features = ["d1"] }
+gitlarp-core = { path = "../core" }
+serde = { version = "1", features = ["derive"] }
+time = "0.3"
+js-sys = "0.3"
+# enables the "js" feature for the getrandom 0.2 that aes-gcm (via gitlarp-core) pulls in on wasm
+getrandom = { version = "0.2", features = ["js"] }

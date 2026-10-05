@@ -1,0 +1,56 @@
+name: release
+on:
+  push:
+    tags: ["v*"]
+jobs:
+  build:
+    name: build ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: gitlarp-x86_64-linux
+          - os: macos-latest
+            name: gitlarp-aarch64-macos
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build CLI (release)
+        run: cargo build --release -p gitlarp
+      - name: Stage binary + checksum
+        run: |
+          mkdir -p dist
+          cp target/release/gitlarp "dist/${{ matrix.name }}"
+          cd dist
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "${{ matrix.name }}" > "${{ matrix.name }}.sha256"
+          else
+            shasum -a 256 "${{ matrix.name }}" > "${{ matrix.name }}.sha256"
+          fi
+          cat "${{ matrix.name }}.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: publish release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/gitlarp-x86_64-linux
+            dist/gitlarp-x86_64-linux.sha256
+            dist/gitlarp-aarch64-macos
+            dist/gitlarp-aarch64-macos.sha256

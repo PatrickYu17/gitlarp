@@ -1,0 +1,114 @@
+# gitlarp CLI Spanish locale (GITLARP_LANG=es). Key set must match
+# locales/en.toml exactly; placeholders ({name}) must be identical.
+
+usage = [
+  "gitlarp: falsifica tu gráfico de contribuciones de GitHub",
+  "",
+  "  gitlarp init                                  crea el repo privado gitlarp-history + config",
+  "  gitlarp day <YYYY-MM-DD> <n>                  n commits en un día",
+  "  gitlarp fill --from <YYYY-MM-DD> --to <YYYY-MM-DD> [--min n] [--max n]",
+  "  gitlarp schedule                              muestra el schedule + estado",
+  "  gitlarp schedule --min n --max n [--from <YYYY-MM-DD>] [--to <YYYY-MM-DD>]",
+  "                    [--no-weekends] [--catch-up n]",
+  "  gitlarp schedule --off                        elimina el schedule",
+  "  gitlarp cron                                  ejecuta ahora los commits programados pendientes",
+  "  gitlarp cron --install                        instala la entrada diaria de launchd/crontab",
+  "  gitlarp cron --uninstall                      elimina la entrada del planificador",
+  "  gitlarp wipe                                  resetea el repo a gitlarp-base (deshace todos los commits)",
+  "",
+  "flags:",
+  "  --force    permite fechas fuera de la ventana y hasta 1000 commits/día",
+  "  --dry-run  imprime el plan sin hacer commits",
+  "",
+  "requiere: gh CLI instalado y autenticado (gh auth login)",
+  "",
+  "env:",
+  "  GITLARP_HOME   dir de config (por defecto ~/.gitlarp)",
+  "  GITLARP_REPO   nombre del repo (por defecto gitlarp-history)",
+]
+
+# errores
+err.prefix = "error: {e}"
+err.day_usage = "uso: gitlarp day <fecha> <n>"
+err.missing_count = "falta el número de commits"
+err.bad_count = "número de commits inválido"
+err.missing_value = "falta el valor de {flag}"
+err.unknown_flag = "flag desconocida {flag}"
+err.bad_min = "--min inválido"
+err.bad_max = "--max inválido"
+err.bad_catchup = "--catch-up inválido"
+err.missing_from = "falta --from"
+err.missing_to = "falta --to"
+err.from_after_to = "--from es posterior a --to"
+err.min_over_max = "--min es mayor que --max"
+err.span_over_cap = "{span} días supera el límite duro de {limit} días por ejecución"
+err.gh_token = "no se pudo obtener un token de GitHub. ¿Está gh instalado y autenticado? (gh auth login)"
+err.no_gh = "gh CLI no encontrado. Instálalo y luego: gh auth login; gitlarp init"
+err.nothing_to_wipe = "nada que limpiar (no hay gitlarp-base ni rama remota)"
+err.sched_needs_minmax = "el schedule necesita --min y --max"
+err.no_schedule = "sin schedule: ejecuta primero gitlarp schedule --min 1 --max 4"
+err.exe = "no se encuentra el binario gitlarp: {e}"
+err.no_home = "no hay HOME"
+err.launchctl_run = "fallo al ejecutar launchctl: {e}"
+err.launchctl_load = "fallo en launchctl load"
+err.crontab_run = "fallo al ejecutar crontab: {e}"
+err.no_stdin = "no hay stdin"
+err.crontab_install = "fallo al instalar el crontab"
+err.unsupported_install = "cron --install solo soporta macOS y Linux"
+err.unsupported_uninstall = "cron --uninstall solo soporta macOS y Linux"
+
+# avisos / notas
+warn.clamped = "se acotaron {n} fecha(s) a la ventana móvil de 12 meses (--force lo anula)"
+warn.outside = "aviso: {n} fecha(s) fuera de la ventana móvil de 12 meses NO contarán en el gráfico"
+warn.catchup = "aviso: {n} día(s) más antiguos que la ventana de catch-up de {cap} quedan vacíos"
+warn.partial = "aviso: ejecución parcial: {e}"
+warn.private = "si los commits no aparecen en el gráfico: activa Private contributions en https://github.com/settings/profile"
+warn.unsigned = "los commits no están firmados; GitHub los muestra como Unverified"
+
+# estado / info
+info.dry_day = "{date}  x{n}"
+info.dry_summary = "dry-run: se crearían {total} commit(s) en {days} día(s)"
+info.created = "creados {made} commit(s)"
+info.init_done = "init completado: repo {repo} (privado), config en {path}"
+info.init_next = "siguiente: gitlarp day <YYYY-MM-DD> <n>"
+info.wiped = "limpiado: rama reseteada a gitlarp-base ({sha})"
+info.wiped_empty = "limpiado: no había gitlarp-base (el repo estaba vacío al empezar); se eliminó origin/{branch}"
+info.no_schedule_status = "sin schedule. Crea uno: gitlarp schedule --min 1 --max 4"
+info.nothing_to_off = "sin schedule configurado (nada que desactivar)"
+info.schedule_off = "schedule desactivado"
+info.schedule_set = "schedule {state}; los commits empiezan mañana (hoy no se rellena)"
+info.state_updated = "actualizado"
+info.state_enabled = "activado"
+info.sched_line = "schedule: {min}-{max} commits/día, fines de semana {weekends}, desde {from}, hasta {to}"
+info.weekends_included = "incluidos"
+info.weekends_excluded = "excluidos"
+info.catchup = "catch-up: hasta {n} día(s) perdidos"
+info.last_run = "última ejecución: {date}"
+info.last_run_never = "última ejecución: nunca"
+info.next_due = "próximo vencimiento: {date}"
+info.next_due_none = "próximo vencimiento: ninguno (el schedule terminó, o revisa --from/--to)"
+info.cron_installed = "cron: instalado"
+info.cron_not_installed = "cron: no instalado (gitlarp cron --install)"
+info.nothing_due_today = "nada pendiente hoy (siguiente: {date})"
+info.nothing_due = "nada pendiente (el schedule terminó, o revisa --from/--to)"
+info.installed_macos = "instalado: diario a las 12:{minute}, también al iniciar sesión; logs en {log}"
+info.installed_linux = "instalado: diario a las 12:{minute}; logs en {log}"
+info.no_launchd = "no hay entrada de launchd que eliminar"
+info.uninstalled_launchd = "desinstalado: eliminado {path}"
+info.no_crontab = "no hay entrada de crontab que eliminar"
+info.uninstalled_crontab = "desinstalado: eliminada la línea # gitlarp del crontab"
+
+# errores del archivo de config
+cfg.read = "config {path}: {e}"
+cfg.badline = "config {path} línea {line}: se esperaba key = \"value\""
+cfg.bad = "config {path} línea {line}: {msg}"
+cfg.bad_min = "schedule_min inválido {v}"
+cfg.bad_max = "schedule_max inválido {v}"
+cfg.bad_weekends = "schedule_weekends inválido {v} (se esperaba true/false)"
+cfg.bad_catchup = "schedule_catchup inválido {v}"
+cfg.sched_minmax = "config {path}: el schedule necesita schedule_min y schedule_max (ambos >= 1)"
+cfg.sched_order = "config {path}: schedule_min es mayor que schedule_max"
+
+# errores del archivo de estado
+state.read = "estado {path}: {e}"
+state.bad = "estado {path}: formato inválido (se esperaba `last = \"YYYY-MM-DD\"`)"

@@ -1,0 +1,10 @@
+node_modules/
+.DS_Store
+target/
+.next/
+.open-next/
+.wrangler/
+*.tsbuildinfo
+.env
+.env.*
+data/

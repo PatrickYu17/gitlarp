@@ -1,0 +1,13 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "gitlarp-web",
+  "main": "cloudflare/worker-entry.js",
+  "compatibility_date": "2026-01-01",
+  "compatibility_flags": ["nodejs_compat"],
+  // static assets (client chunks, css) are served by the Workers asset
+  // layer; required by @opennextjs/cloudflare for deploys to work
+  "assets": {
+    "directory": ".open-next/assets",
+    "binding": "ASSETS"
+  }
+}

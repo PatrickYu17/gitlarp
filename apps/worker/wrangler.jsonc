@@ -1,0 +1,18 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "gitlarp-worker",
+  "main": "build/worker/shim.mjs",
+  "compatibility_date": "2026-01-01",
+  "triggers": { "crons": ["30 12 * * *"] },
+  "d1_databases": [
+    {
+      "binding": "GITLARP_DB",
+      "database_name": "gitlarp-schedules",
+      "database_id": "00000000-0000-0000-0000-000000000000"
+    }
+  ],
+  // wrangler secret put GITLARP_SCHEDULE_SECRET
+  "build": {
+    "command": "cargo install worker-build && worker-build --release"
+  }
+}

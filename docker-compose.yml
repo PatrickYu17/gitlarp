@@ -1,0 +1,47 @@
+# gitlarp: one-click Docker deploy (server + web UI).
+#
+#   export GITLARP_SCHEDULE_SECRET=$(openssl rand -base64 32)
+#   docker compose up -d --build
+#
+# The secret belongs to the server service (its scheduler).
+# It must be at least 16 characters — the server refuses to start
+# otherwise, since it is the only thing protecting stored PATs.
+# Without it the scheduler is disabled (safe default).
+# If rotating the secret, also set GITLARP_SCHEDULE_SECRET_OLD.
+#
+# Before publishing a release, smoke-test the stack end to end:
+#   bash scripts/docker-smoke.sh
+
+services:
+  server:
+    build:
+      context: .
+      dockerfile: apps/server/Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      # server defaults to PORT=3000; compose publishes 8080
+      PORT: "8080"
+      GITLARP_SCHEDULE_SECRET: ${GITLARP_SCHEDULE_SECRET:-}
+      GITLARP_SCHEDULE_SECRET_OLD: ${GITLARP_SCHEDULE_SECRET_OLD:-}
+      SCHEDULE_DIR: /data
+      SCHEDULE_LOOP: "1"
+    volumes:
+      - gitlarp-data:/data
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+      args:
+        # Build-time value inlined into the browser bundle; it must be the
+        # published host port (what the user's browser can reach), NOT the
+        # compose service name.
+        NEXT_PUBLIC_GITLARP_API_URL: http://localhost:8080
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+
+volumes:
+  gitlarp-data:
