@@ -139,6 +139,7 @@ pub fn parse_api_plan_capped(raw: &Value, today: Date, caps: Caps) -> Result<Pla
 /// Splits a plan into batches of at most `size` commits, preserving
 /// date order (an entry may straddle batches).
 pub fn chunk_plan(days: &[(Date, u32)], size: u32) -> Vec<Vec<(Date, u32)>> {
+    assert!(size > 0, "chunk_plan: size must be > 0 (a zero size never fills a chunk)");
     let mut out = Vec::new();
     let mut chunk: Vec<(Date, u32)> = Vec::new();
     let mut used = 0u32;
@@ -311,6 +312,13 @@ mod tests {
         );
         let empty = chunk_plan(&[], 50);
         assert!(empty.is_empty());
+    }
+
+    /// size == 0 would spin forever (no batch ever fills); reject it.
+    #[test]
+    #[should_panic(expected = "chunk_plan: size must be > 0")]
+    fn chunk_plan_rejects_zero_size() {
+        chunk_plan(&[(date!(2026-08-20), 1)], 0);
     }
 
     #[test]

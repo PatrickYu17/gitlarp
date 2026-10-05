@@ -10,17 +10,19 @@
 //! - `POST /api/schedules/run`: run every due schedule (bearer = secret)
 //! - `GET /healthz`: liveness, no auth
 //!
-//! Hardening: PAT moves in the `Authorization: Bearer` header (legacy
-//! `?pat=` still honored), 1 MiB bodies, 30s client timeout, 30/min
-//! fixed-window rate limit per IP on every endpoint that talks to
-//! upstream GitHub (all mutations + `/api/graph`, whose two upstream
-//! calls per request would otherwise let anonymous clients burn the
+//! Hardening: PAT moves only in the `Authorization: Bearer` header
+//! (the legacy `?pat=` query param is gone: PATs leak via browser
+//! history, proxy logs, and Referer headers), 1 MiB bodies, 30s
+//! client timeout, 30/min fixed-window rate limit per IP on every
+//! endpoint that talks to upstream GitHub (all mutations +
+//! `/api/graph` + `GET /api/schedules`, whose upstream calls per
+//! request would otherwise let anonymous clients burn the
 //! server's egress IP against GitHub's unauthenticated quota), a
 //! process-wide lock serializing commit writes (the engine is not
 //! atomic against concurrent runs: see engine.rs), fail-closed
 //! runner gating with a constant-time bearer compare, and lazy
 //! secret rotation heal (`GITLARP_SCHEDULE_SECRET_OLD`). The schedule
-//! secret must be at least MIN_SECRET_LEN chars: it is the only thing
+//! secret must be at least MIN_SECRET_LEN bytes: it is the only thing
 //! protecting stored PATs and the AES key is a plain SHA-256 of it.
 
 use std::collections::HashMap;
@@ -36,7 +38,7 @@ use actix_web::error::ResponseError as _;
 use gitlarp_core::http::{
     BoxFut, HttpRequest as CoreRequest, HttpResponse as CoreResponse,
 };
-use gitlarp_core::runner::{run_due_schedules, StoredSchedule};
+use gitlarp_core::runner::{run_due_schedules, Secrets, StoredSchedule};
 use gitlarp_core::store::file::FileStore;
 use gitlarp_core::store::Store;
 use gitlarp_core::{crypto, date, engine, gh, plan, schedule, Error, Runtime};
@@ -213,7 +215,7 @@ fn os_seed_u64() -> u64 {
 }
 
 /// xorshift64 PRNG for fill counts (not a nonce source; nonces come
-/// from `crypto::random_iv` / OS entropy only).
+/// from OS entropy inside `crypto::encrypt_json` only).
 fn xorshift_rng(seed: u64) -> impl FnMut(u32, u32) -> u32 {
     let mut s = seed.max(1);
     move |lo: u32, hi: u32| {
@@ -227,17 +229,16 @@ fn xorshift_rng(seed: u64) -> impl FnMut(u32, u32) -> u32 {
     }
 }
 
-/// PAT transport: `Authorization: Bearer <PAT>` wins; the legacy
-/// `?pat=` query param is still honored (deprecated) as a fallback.
-fn pat_from(req: &HttpRequest, query: &HashMap<String, String>) -> String {
-    let header = req
-        .headers()
+/// PAT transport: `Authorization: Bearer <PAT>` only — the legacy
+/// `?pat=` query param is gone (PATs leak via browser history,
+/// proxy logs, and Referer headers); requests without a usable
+/// header are rejected as missing.
+fn pat_from(req: &HttpRequest) -> String {
+    req.headers()
         .get(AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
-        .map(str::to_string);
-    header
-        .or_else(|| query.get("pat").cloned())
+        .map(str::to_string)
         .unwrap_or_default()
 }
 
@@ -318,18 +319,14 @@ async fn commits_post(
     }
 }
 
-async fn graph_get(
-    state: web::Data<AppState>,
-    req: HttpRequest,
-    query: web::Query<HashMap<String, String>>,
-) -> HttpResponse {
+async fn graph_get(state: web::Data<AppState>, req: HttpRequest) -> HttpResponse {
     // rate-limited like the mutations: each call makes two upstream
     // GitHub requests, so anonymous hammering would burn the server's
     // egress IP against GitHub's unauthenticated quota
     if let Some(resp) = rate_guard(&state, &req) {
         return resp;
     }
-    let pat = pat_from(&req, &query);
+    let pat = pat_from(&req);
     if pat.is_empty() {
         return bad_request("missing pat");
     }
@@ -344,12 +341,14 @@ async fn graph_get(
     }
 }
 
-async fn schedules_get(
-    state: web::Data<AppState>,
-    req: HttpRequest,
-    query: web::Query<HashMap<String, String>>,
-) -> HttpResponse {
-    let pat = pat_from(&req, &query);
+async fn schedules_get(state: web::Data<AppState>, req: HttpRequest) -> HttpResponse {
+    // rate-limited like the mutations: each call resolves the user
+    // upstream (even for garbage PATs), so anonymous hammering would
+    // burn the server's egress IP against GitHub's quota
+    if let Some(resp) = rate_guard(&state, &req) {
+        return resp;
+    }
+    let pat = pat_from(&req);
     if pat.is_empty() {
         return bad_request("missing pat");
     }
@@ -384,8 +383,7 @@ async fn schedules_get(
         let (data, needs_heal) = healed;
         // lazy heal: re-encrypt under the current secret and put it back
         if needs_heal {
-            let iv = crypto::random_iv(state.rt.as_ref());
-            if let Ok(blob) = crypto::encrypt_json(&secret, &data, &iv) {
+            if let Ok(blob) = crypto::encrypt_json(&secret, &data) {
                 if state.store.put(&uid, &rec.id, &blob).await.is_ok() {
                     log::info!("schedule {uid}/{}: re-encrypted under current secret", rec.id);
                 }
@@ -426,8 +424,7 @@ async fn schedules_post(
         last_run: today,
         created_at: date::fmt(today),
     };
-    let iv = crypto::random_iv(state.rt.as_ref());
-    let blob = match crypto::encrypt_json(&secret, &stored, &iv) {
+    let blob = match crypto::encrypt_json(&secret, &stored) {
         Ok(b) => b,
         Err(e) => return core_error(e),
     };
@@ -449,7 +446,7 @@ async fn schedules_delete(
     if let Some(resp) = rate_guard(&state, &req) {
         return resp;
     }
-    let pat = pat_from(&req, &query);
+    let pat = pat_from(&req);
     if pat.is_empty() {
         return bad_request("missing pat");
     }
@@ -492,10 +489,13 @@ async fn schedules_run(state: web::Data<AppState>, req: HttpRequest) -> HttpResp
     let logger = |line: &str| log::info!("runner: {line}");
     // serialize against POST /api/commits and the hourly loop
     let _write = state.write_lock.lock().await;
+    // old_secret: rotated records still run and heal under the current
+    // secret, mirroring the GET-side lazy heal
+    let secrets = Secrets { current: &secret, old: state.old_secret.as_deref() };
     match run_due_schedules(
         state.rt.as_ref(),
         state.store.as_ref(),
-        &secret,
+        &secrets,
         today,
         &mut rng,
         &logger,
@@ -540,8 +540,8 @@ fn build_app(
                 .add(("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS"))
                 .add(("Access-Control-Allow-Headers", "Authorization, Content-Type")),
         )
-        // Log method + URL path but NOT the query string: the legacy
-        // ?pat= fallback would otherwise write PATs into the logs.
+        // Log method + URL path but NOT the query string: query
+        // params are client-supplied data and never belong in logs.
         .wrap(Logger::new("%a \"%m %U %H\" %s %b %Dms"))
         // Logger wraps bodies in a private StreamLog type; re-boxing them
         // here keeps the App's type expressible in this fn's signature.
@@ -597,6 +597,7 @@ fn spawn_schedule_loop(
     rt: Arc<ServerRuntime>,
     store: Arc<dyn Store>,
     secret: String,
+    old_secret: Option<String>,
     write_lock: Arc<tokio::sync::Mutex<()>>,
 ) {
     let builder = std::thread::Builder::new().name("gitlarp-schedule-loop".into());
@@ -618,10 +619,11 @@ fn spawn_schedule_loop(
                 let mut rng = xorshift_rng(os_seed_u64());
                 let logger = |line: &str| log::info!("schedule loop: {line}");
                 let _write = write_lock.lock().await;
+                let secrets = Secrets { current: &secret, old: old_secret.as_deref() };
                 match run_due_schedules(
                     rt.as_ref(),
                     store.as_ref(),
-                    &secret,
+                    &secrets,
                     today,
                     &mut rng,
                     &logger,
@@ -629,11 +631,12 @@ fn spawn_schedule_loop(
                 .await
                 {
                     Ok(res) => log::info!(
-                        "schedule tick: {} schedule(s), {} run, {} commit(s), {} failed",
+                        "schedule tick: {} schedule(s), {} run, {} commit(s), {} failed, {} deferred",
                         res.schedules,
                         res.ran,
                         res.commits,
-                        res.failed
+                        res.failed,
+                        res.deferred
                     ),
                     Err(e) => log::error!("schedule tick failed: {e}"),
                 }
@@ -652,16 +655,17 @@ fn nonempty_env(name: &str) -> Option<String> {
     }
 }
 
-/// A configured schedule secret must be at least MIN_SECRET_LEN chars:
-/// it is the only thing protecting stored GitHub PATs, and the AES key
-/// is a plain SHA-256 of it (no KDF stretching), so short secrets are
+/// A configured schedule secret must be at least MIN_SECRET_LEN bytes
+/// (the raw key material SHA-256 digests, not display chars): it is
+/// the only thing protecting stored GitHub PATs, and the AES key is
+/// a plain SHA-256 of it (no KDF stretching), so short secrets are
 /// brute-forceable. Refuse to start rather than run under one.
 fn check_secret(s: &str) -> Result<(), String> {
-    if s.chars().count() >= MIN_SECRET_LEN {
+    if s.len() >= MIN_SECRET_LEN {
         Ok(())
     } else {
         Err(format!(
-            "GITLARP_SCHEDULE_SECRET must be at least {MIN_SECRET_LEN} characters \
+            "GITLARP_SCHEDULE_SECRET must be at least {MIN_SECRET_LEN} bytes \
              (e.g. `openssl rand -base64 32`); refusing to run with a brute-forceable secret"
         ))
     }
@@ -708,6 +712,7 @@ async fn main() -> std::io::Result<()> {
                 state.rt.clone(),
                 state.store.clone(),
                 secret,
+                state.old_secret.clone(),
                 state.write_lock.clone(),
             );
         } else {
@@ -943,20 +948,22 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
+    /// The legacy `?pat=` query param is gone: a query-only request
+    /// has no PAT and is rejected like any other missing PAT.
     #[actix_web::test]
-    async fn graph_via_deprecated_query_param() {
+    async fn graph_query_param_alone_is_400() {
         let dir = temp_root();
         let state = test_state(dir.clone(), Some("S"), None, true);
         let app = test::init_service(build_app(state)).await;
         let req = TestRequest::get().uri("/api/graph?pat=p2").to_request();
         let (status, v) = call_json(&app, req).await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(v["counts"]["2026-01-01"], 2, "counts come from tester2's calendar");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(v["error"], "missing pat");
         std::fs::remove_dir_all(dir).ok();
     }
 
     #[actix_web::test]
-    async fn graph_header_wins_over_query_param() {
+    async fn graph_ignores_query_param_when_header_present() {
         let dir = temp_root();
         let state = test_state(dir.clone(), Some("S"), None, true);
         let app = test::init_service(build_app(state)).await;
@@ -966,7 +973,7 @@ mod tests {
             .to_request();
         let (status, v) = call_json(&app, req).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(v["counts"]["2026-01-01"], 1, "the header PAT (p1/tester) must win");
+        assert_eq!(v["counts"]["2026-01-01"], 1, "the header PAT must serve; the query param is dead");
         std::fs::remove_dir_all(dir).ok();
     }
 
@@ -1134,7 +1141,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(
             v,
-            json!({ "schedules": 0, "ran": 0, "commits": 0, "failed": 0 })
+            json!({ "schedules": 0, "ran": 0, "commits": 0, "failed": 0, "deferred": 0 })
         );
         std::fs::remove_dir_all(dir).ok();
     }
@@ -1151,7 +1158,7 @@ mod tests {
             last_run: date::add_days(today, -1),
             created_at: date::fmt(date::add_days(today, -10)),
         };
-        let blob = crypto::encrypt_json("S", &stored, &[0u8; 12]).unwrap();
+        let blob = crypto::encrypt_json_with_iv("S", &stored, &[0u8; 12]).unwrap();
         let seed = FileStore::new(&dir);
         seed.put("1", "sched1", &blob).await.unwrap();
 
@@ -1172,6 +1179,47 @@ mod tests {
         let payload = seed.get("1", "sched1").await.unwrap().unwrap();
         let now: StoredSchedule = crypto::decrypt_json("S", &payload).unwrap();
         assert_eq!(now.last_run, today);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// The run endpoint mirrors the GET-side lazy heal: a record still
+    /// encrypted under the old secret runs and is re-encrypted under
+    /// the current one, instead of being skipped-failed.
+    #[actix_web::test]
+    async fn run_processes_and_heals_old_secret_record() {
+        let dir = temp_root();
+        let today = date::today_utc();
+        let spec = schedule::parse_spec(&json!({ "min": 1, "max": 1 })).unwrap();
+        // due: last run yesterday, catch-up 7 -> today is in the window
+        let stored = StoredSchedule {
+            pat: "p1".into(),
+            spec,
+            last_run: date::add_days(today, -1),
+            created_at: date::fmt(date::add_days(today, -10)),
+        };
+        let blob = crypto::encrypt_json_with_iv("A", &stored, &[0u8; 12]).unwrap();
+        let seed = FileStore::new(&dir);
+        seed.put("1", "sched1", &blob).await.unwrap();
+
+        // rotated: current secret B, old secret A configured
+        let state = test_state(dir.clone(), Some("B"), Some("A"), true);
+        let app = test::init_service(build_app(state)).await;
+        let req = TestRequest::post()
+            .uri("/api/schedules/run")
+            .insert_header(bearer("B"))
+            .to_request();
+        let (status, v) = call_json(&app, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(v["schedules"], 1);
+        assert_eq!(v["ran"], 1);
+        assert_eq!(v["commits"], 1);
+        assert_eq!(v["failed"], 0);
+
+        // healed: the stored payload now decrypts under the current secret
+        let payload = seed.get("1", "sched1").await.unwrap().unwrap();
+        let healed: StoredSchedule = crypto::decrypt_json("B", &payload)
+            .expect("the run must re-encrypt under the current secret");
+        assert_eq!(healed.last_run, today);
         std::fs::remove_dir_all(dir).ok();
     }
 
@@ -1231,6 +1279,35 @@ mod tests {
             .to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// `GET /api/schedules` resolves the user upstream on every call
+    /// (including garbage PATs), so it shares the 30/min window with
+    /// the rest of the upstream-talking endpoints.
+    #[actix_web::test]
+    async fn schedules_get_is_rate_limited_after_the_window_budget() {
+        let dir = temp_root();
+        let state = test_state(dir.clone(), Some("S"), None, true);
+        let app = test::init_service(build_app(state)).await;
+        for i in 0..RATE_MAX_PER_WINDOW {
+            let req = TestRequest::get()
+                .uri("/api/schedules")
+                .insert_header(bearer("p1"))
+                .to_request();
+            let resp = test::call_service(&app, req).await;
+            assert_eq!(resp.status(), StatusCode::OK, "schedules call {i} under the limit");
+        }
+        let req = TestRequest::get()
+            .uri("/api/schedules")
+            .insert_header(bearer("p1"))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            resp.headers().get("Retry-After").and_then(|v| v.to_str().ok()),
+            Some("60")
+        );
         std::fs::remove_dir_all(dir).ok();
     }
 
@@ -1375,5 +1452,10 @@ mod tests {
             assert!(check_secret(weak).is_err(), "must reject: {weak:?}");
             assert!(check_secret(weak).unwrap_err().contains("GITLARP_SCHEDULE_SECRET"));
         }
+        // the limit counts bytes of key material, not display chars:
+        // 8 four-byte emoji pass where 8 chars would not
+        assert!(check_secret(&"😀".repeat(8)).is_ok());
+        // 7 two-byte chars + one byte = 15 bytes -> still too short
+        assert!(check_secret(&format!("{}x", "é".repeat(7))).is_err());
     }
 }

@@ -5,15 +5,19 @@
 //! reachable commit was created, so `lastRun` stays put and the next
 //! tick retries the same window. On success (including partial
 //! results, where the ref was updated) the window is marked done.
-//! With `RunLimits`, a window too big for the shell's per-invocation
+//! With `RunLimits`, a window too big for the shell's per-record
 //! budget runs only its leading days; `lastRun` then advances just
 //! past the last attempted day, so the remainder comes due again on
-//! the next tick.
+//! the next tick. A record whose due work would not fit the
+//! invocation-wide budget defers untouched: `lastRun` stays put, the
+//! record is not failed, and the next tick retries it. Records the
+//! current secret cannot decrypt fall back to `old_secret` (secret
+//! rotation); the store-back heals them under the current secret.
 
 use serde::{Deserialize, Serialize};
 use time::Date;
 
-use crate::crypto::{decrypt_json, encrypt_json, random_iv};
+use crate::crypto::{decrypt_json, encrypt_json};
 use crate::engine::write_commits;
 use crate::gh::DEFAULT_REPO;
 use crate::http::Runtime;
@@ -40,27 +44,45 @@ pub struct RunnerResult {
     pub ran: u32,
     pub commits: u32,
     pub failed: u32,
+    /// Records deferred by the invocation-wide budget: not failures,
+    /// they are retried untouched on the next tick.
+    pub deferred: u32,
 }
 
-/// Per-run budget for a single schedule record.
+/// The secrets the runner decrypts with: the current one first,
+/// then the rotated-out predecessor as a fallback (records still
+/// encrypted under it heal on the store-back).
+#[derive(Debug, Clone, Copy)]
+pub struct Secrets<'a> {
+    pub current: &'a str,
+    pub old: Option<&'a str>,
+}
+
+/// Budgets for one runner invocation.
 ///
 /// Shells with a hard per-invocation request ceiling (the Cloudflare
 /// worker: one fetch subrequest per commit, ~50/invocation on the
-/// free plan) use this to stay under it. When the due window exceeds
-/// the budget, only the leading days run and `lastRun` advances to
-/// the last attempted day, so the deferred days come due again on
-/// the next tick instead of being silently dropped. The first day
-/// always runs (even when its count alone exceeds the budget), so a
-/// record with big days still makes progress.
+/// free plan) use these to stay under it. When a record's due window
+/// exceeds `max_commits_per_run`, only the leading days run and
+/// `lastRun` advances to the last attempted day, so the deferred days
+/// come due again on the next tick instead of being silently dropped.
+/// The first day always runs (even when its count alone exceeds the
+/// budget), so a record with big days still makes progress.
+/// `max_commits_total` spans every record in the invocation — the
+/// platform ceiling is per invocation, not per record — and a record
+/// whose due work would not fit the remainder defers entirely:
+/// `lastRun` untouched, not failed, retried on the next tick.
 #[derive(Debug, Clone, Copy)]
 pub struct RunLimits {
     /// Max commits per schedule record per invocation; 0 = uncapped.
     pub max_commits_per_run: u32,
+    /// Max commits across all records in one invocation; None = uncapped.
+    pub max_commits_total: Option<u32>,
 }
 
 impl RunLimits {
     pub const fn none() -> Self {
-        RunLimits { max_commits_per_run: 0 }
+        RunLimits { max_commits_per_run: 0, max_commits_total: None }
     }
 }
 
@@ -69,32 +91,47 @@ impl RunLimits {
 pub async fn run_due_schedules(
     rt: &dyn Runtime,
     store: &dyn Store,
-    secret: &str,
+    secrets: &Secrets<'_>,
     today: Date,
     rng: &mut dyn FnMut(u32, u32) -> u32,
     log: &dyn Fn(&str),
 ) -> Result<RunnerResult, Error> {
-    run_due_schedules_limited(rt, store, secret, today, rng, log, RunLimits::none()).await
+    run_due_schedules_limited(rt, store, secrets, today, rng, log, RunLimits::none()).await
 }
 
 pub async fn run_due_schedules_limited(
     rt: &dyn Runtime,
     store: &dyn Store,
-    secret: &str,
+    secrets: &Secrets<'_>,
     today: Date,
     rng: &mut dyn FnMut(u32, u32) -> u32,
     log: &dyn Fn(&str),
     limits: RunLimits,
 ) -> Result<RunnerResult, Error> {
     let mut out = RunnerResult::default();
-    for user in store.list_users().await? {
+    // invocation-wide budget: the platform ceiling is per cron
+    // invocation, not per record, so every record draws from one pot
+    let mut budget = limits.max_commits_total;
+    'invocation: for user in store.list_users().await? {
         for record in store.list(&user).await? {
             out.schedules += 1;
             let key = format!("{user}/{}", record.id);
-            let Ok(mut data) = decrypt_json::<StoredSchedule>(secret, &record.payload) else {
-                log(&format!("schedule {key}: cannot decrypt (secret rotated?), skipped"));
-                out.failed += 1;
-                continue;
+            // current secret first; on failure try the old one
+            // (rotation) — the store-back below then heals the
+            // record under the current secret
+            let mut data = match decrypt_json::<StoredSchedule>(secrets.current, &record.payload) {
+                Ok(d) => d,
+                Err(_) => match secrets
+                    .old
+                    .map(|old| decrypt_json::<StoredSchedule>(old, &record.payload))
+                {
+                    Some(Ok(d)) => d,
+                    _ => {
+                        log(&format!("schedule {key}: cannot decrypt (secret rotated?), skipped"));
+                        out.failed += 1;
+                        continue;
+                    }
+                },
             };
             let mut days = due_days(&data.spec, Some(data.last_run), today, rng);
             // Trim the window at a day boundary to fit the per-run
@@ -122,6 +159,23 @@ pub async fn run_due_schedules_limited(
                     days.truncate(cut);
                 }
             }
+            // Invocation-wide budget: a record that would not fit the
+            // remaining pot defers untouched (not failed) and stops
+            // the run — later records cannot fit either. Counted by
+            // the attempted window: a failed run still burns the
+            // platform's subrequests.
+            let due: u32 = days.iter().map(|&(_, n)| n).sum();
+            if let Some(remaining) = budget {
+                if due > remaining {
+                    log(&format!(
+                        "schedule {key}: deferred to the next run ({due} commit(s) due, \
+                         {remaining} left in the invocation budget)"
+                    ));
+                    out.deferred += 1;
+                    break 'invocation;
+                }
+                budget = Some(remaining.saturating_sub(due));
+            }
             if !days.is_empty() {
                 match write_commits(rt, &data.pat, DEFAULT_REPO, &days, None).await {
                     Ok(r) => {
@@ -147,7 +201,7 @@ pub async fn run_due_schedules_limited(
                 }
             }
             data.last_run = last_done;
-            let blob = match encrypt_json(secret, &data, &random_iv(rt)) {
+            let blob = match encrypt_json(secrets.current, &data) {
                 Ok(b) => b,
                 Err(_) => {
                     out.failed += 1;
@@ -211,8 +265,12 @@ mod tests {
 
     impl Store for MemStore {
         fn list_users(&self) -> crate::http::BoxFut<Result<Vec<String>, Error>> {
-            let users: Vec<String> =
+            let mut users: Vec<String> =
                 self.recs.lock().unwrap().iter().map(|(u, _, _)| u.clone()).collect();
+            // one entry per user, like both real stores (FileStore
+            // lists user dirs, D1 does SELECT DISTINCT)
+            users.sort();
+            users.dedup();
             Box::pin(std::future::ready(Ok(users)))
         }
         fn list(&self, user: &str) -> crate::http::BoxFut<Result<Vec<ScheduleRecord>, Error>> {
@@ -280,7 +338,7 @@ mod tests {
             last_run: date!(2026-08-28),
             created_at: "2026-08-01".into(),
         };
-        let blob = crate::crypto::encrypt_json(secret, &stored, &[0u8; 12]).unwrap();
+        let blob = crate::crypto::encrypt_json_with_iv(secret, &stored, &[0u8; 12]).unwrap();
         let store = MemStore { recs: Mutex::new(vec![("u".into(), "s1".into(), blob)]) };
         let logs = Mutex::new(Vec::<String>::new());
         let log = |line: &str| logs.lock().unwrap().push(line.into());
@@ -291,13 +349,13 @@ mod tests {
         let r = crate::block_on(run_due_schedules(
             &mock,
             &store,
-            secret,
+            &Secrets { current: secret, old: None },
             date!(2026-08-29),
             &mut rng,
             &log,
         ))
         .unwrap();
-        assert_eq!((r.schedules, r.ran, r.commits, r.failed), (1, 1, 1, 0));
+        assert_eq!((r.schedules, r.ran, r.commits, r.failed, r.deferred), (1, 1, 1, 0, 0));
         let payload = crate::block_on(store.get("u", "s1")).unwrap().unwrap();
         let now: StoredSchedule = crate::crypto::decrypt_json(secret, &payload).unwrap();
         assert_eq!(now.last_run, date!(2026-08-29));
@@ -311,18 +369,18 @@ mod tests {
             }),
         };
         let stored2 = StoredSchedule { last_run: date!(2026-08-28), ..now.clone() };
-        let blob2 = crate::crypto::encrypt_json(secret, &stored2, &[0u8; 12]).unwrap();
+        let blob2 = crate::crypto::encrypt_json_with_iv(secret, &stored2, &[0u8; 12]).unwrap();
         let store2 = MemStore { recs: Mutex::new(vec![("u".into(), "s1".into(), blob2)]) };
         let r2 = crate::block_on(run_due_schedules(
             &mock,
             &store2,
-            secret,
+            &Secrets { current: secret, old: None },
             date!(2026-08-29),
             &mut rng,
             &log,
         ))
         .unwrap();
-        assert_eq!((r2.schedules, r2.ran, r2.commits, r2.failed), (1, 0, 0, 1));
+        assert_eq!((r2.schedules, r2.ran, r2.commits, r2.failed, r2.deferred), (1, 0, 0, 1, 0));
         let payload2 = crate::block_on(store2.get("u", "s1")).unwrap().unwrap();
         let after: StoredSchedule = crate::crypto::decrypt_json(secret, &payload2).unwrap();
         assert_eq!(after.last_run, date!(2026-08-28), "failure must not advance the window");
@@ -341,25 +399,25 @@ mod tests {
             last_run: date!(2026-08-27),
             created_at: "2026-08-01".into(),
         };
-        let blob = crate::crypto::encrypt_json(secret, &stored, &[0u8; 12]).unwrap();
+        let blob = crate::crypto::encrypt_json_with_iv(secret, &stored, &[0u8; 12]).unwrap();
         let store = MemStore { recs: Mutex::new(vec![("u".into(), "s1".into(), blob)]) };
         let log = |_: &str| {};
 
         // 3 due days (28, 29, 30), budget 2 -> only 28 and 29 run
         let mock = Mock { responses: Mutex::new(gh_responses(2)) };
         let mut rng = |lo: u32, _hi: u32| lo;
-        let limits = RunLimits { max_commits_per_run: 2 };
+        let limits = RunLimits { max_commits_per_run: 2, max_commits_total: None };
         let r = crate::block_on(run_due_schedules_limited(
             &mock,
             &store,
-            secret,
+            &Secrets { current: secret, old: None },
             date!(2026-08-30),
             &mut rng,
             &log,
             limits,
         ))
         .unwrap();
-        assert_eq!((r.schedules, r.ran, r.commits, r.failed), (1, 1, 2, 0));
+        assert_eq!((r.schedules, r.ran, r.commits, r.failed, r.deferred), (1, 1, 2, 0, 0));
         let payload = crate::block_on(store.get("u", "s1")).unwrap().unwrap();
         let mid: StoredSchedule = crate::crypto::decrypt_json(secret, &payload).unwrap();
         assert_eq!(
@@ -374,14 +432,14 @@ mod tests {
         let r2 = crate::block_on(run_due_schedules_limited(
             &mock,
             &store,
-            secret,
+            &Secrets { current: secret, old: None },
             date!(2026-08-30),
             &mut rng,
             &log,
             limits,
         ))
         .unwrap();
-        assert_eq!((r2.schedules, r2.ran, r2.commits, r2.failed), (1, 1, 1, 0));
+        assert_eq!((r2.schedules, r2.ran, r2.commits, r2.failed, r2.deferred), (1, 1, 1, 0, 0));
         let payload = crate::block_on(store.get("u", "s1")).unwrap().unwrap();
         let done: StoredSchedule = crate::crypto::decrypt_json(secret, &payload).unwrap();
         assert_eq!(done.last_run, date!(2026-08-30));
@@ -399,7 +457,7 @@ mod tests {
             last_run: date!(2026-08-27),
             created_at: "2026-08-01".into(),
         };
-        let blob = crate::crypto::encrypt_json(secret, &stored, &[0u8; 12]).unwrap();
+        let blob = crate::crypto::encrypt_json_with_iv(secret, &stored, &[0u8; 12]).unwrap();
         let store = MemStore { recs: Mutex::new(vec![("u".into(), "s1".into(), blob)]) };
         let log = |_: &str| {};
 
@@ -409,14 +467,14 @@ mod tests {
         let r = crate::block_on(run_due_schedules_limited(
             &mock,
             &store,
-            secret,
+            &Secrets { current: secret, old: None },
             date!(2026-08-28),
             &mut rng,
             &log,
-            RunLimits { max_commits_per_run: 2 },
+            RunLimits { max_commits_per_run: 2, max_commits_total: None },
         ))
         .unwrap();
-        assert_eq!((r.schedules, r.ran, r.commits, r.failed), (1, 1, 3, 0));
+        assert_eq!((r.schedules, r.ran, r.commits, r.failed, r.deferred), (1, 1, 3, 0, 0));
         let payload = crate::block_on(store.get("u", "s1")).unwrap().unwrap();
         let after: StoredSchedule = crate::crypto::decrypt_json(secret, &payload).unwrap();
         assert_eq!(after.last_run, date!(2026-08-28));
@@ -433,17 +491,18 @@ mod tests {
             last_run: date!(2026-08-27),
             created_at: "2026-08-01".into(),
         };
-        let blob = crate::crypto::encrypt_json(secret, &stored, &[0u8; 12]).unwrap();
+        let blob = crate::crypto::encrypt_json_with_iv(secret, &stored, &[0u8; 12]).unwrap();
         let store = MemStore { recs: Mutex::new(vec![("u".into(), "s1".into(), blob)]) };
         let log = |_: &str| {};
         // 3 due days, all written in one pass despite a tiny budget
         let mock = Mock { responses: Mutex::new(gh_responses(3)) };
         let mut rng = |lo: u32, _hi: u32| lo;
         assert_eq!(RunLimits::none().max_commits_per_run, 0);
+        assert!(RunLimits::none().max_commits_total.is_none());
         let r = crate::block_on(run_due_schedules_limited(
             &mock,
             &store,
-            secret,
+            &Secrets { current: secret, old: None },
             date!(2026-08-30),
             &mut rng,
             &log,
@@ -454,6 +513,149 @@ mod tests {
         let payload = crate::block_on(store.get("u", "s1")).unwrap().unwrap();
         let after: StoredSchedule = crate::crypto::decrypt_json(secret, &payload).unwrap();
         assert_eq!(after.last_run, date!(2026-08-30));
+    }
+
+    /// The invocation budget spans records: when the first record
+    /// spends it all, the second defers with `lastRun` untouched
+    /// (and is not failed), and the next run picks it up.
+    #[test]
+    fn invocation_budget_defers_later_records_to_the_next_run() {
+        let secret = "topsecret";
+        let mk = || StoredSchedule {
+            pat: "pat".into(),
+            spec: parse_spec(&serde_json::json!({ "min": 1, "max": 1 })).unwrap(),
+            last_run: date!(2026-08-29),
+            created_at: "2026-08-01".into(),
+        };
+        let store = MemStore {
+            recs: Mutex::new(vec![
+                ("u".into(), "s1".into(), crate::crypto::encrypt_json_with_iv(
+                    secret,
+                    &mk(),
+                    &[0u8; 12],
+                )
+                .unwrap()),
+                ("u".into(), "s2".into(), crate::crypto::encrypt_json_with_iv(
+                    secret,
+                    &mk(),
+                    &[0u8; 12],
+                )
+                .unwrap()),
+            ]),
+        };
+        let logs = Mutex::new(Vec::<String>::new());
+        let log = |line: &str| logs.lock().unwrap().push(line.into());
+
+        // one shared commit for the whole invocation: s1 runs, s2 defers
+        let mock = Mock { responses: Mutex::new(gh_responses(1)) };
+        let mut rng = |lo: u32, _hi: u32| lo;
+        let limits = RunLimits { max_commits_per_run: 0, max_commits_total: Some(1) };
+        let r = crate::block_on(run_due_schedules_limited(
+            &mock,
+            &store,
+            &Secrets { current: secret, old: None },
+            date!(2026-08-30),
+            &mut rng,
+            &log,
+            limits,
+        ))
+        .unwrap();
+        assert_eq!((r.schedules, r.ran, r.commits, r.failed, r.deferred), (2, 1, 1, 0, 1));
+        let payload = crate::block_on(store.get("u", "s2")).unwrap().unwrap();
+        let s2: StoredSchedule = crate::crypto::decrypt_json(secret, &payload).unwrap();
+        assert_eq!(s2.last_run, date!(2026-08-29), "a deferred record keeps its window");
+        assert!(
+            logs.lock().unwrap().iter().any(|l| l.contains("u/s2") && l.contains("deferred")),
+            "the deferral must name the record: {:?}",
+            logs.lock().unwrap()
+        );
+
+        // next tick: a fresh budget; s1 has nothing due, s2 catches up
+        let mock = Mock { responses: Mutex::new(gh_responses(1)) };
+        let r2 = crate::block_on(run_due_schedules_limited(
+            &mock,
+            &store,
+            &Secrets { current: secret, old: None },
+            date!(2026-08-30),
+            &mut rng,
+            &log,
+            limits,
+        ))
+        .unwrap();
+        assert_eq!((r2.schedules, r2.ran, r2.commits, r2.failed, r2.deferred), (2, 1, 1, 0, 0));
+        let payload = crate::block_on(store.get("u", "s2")).unwrap().unwrap();
+        let done: StoredSchedule = crate::crypto::decrypt_json(secret, &payload).unwrap();
+        assert_eq!(done.last_run, date!(2026-08-30));
+    }
+
+    /// A record still encrypted under the old secret runs via the
+    /// rotation fallback, and the store-back heals it: the stored
+    /// payload decrypts under the current secret afterwards.
+    #[test]
+    fn old_secret_record_runs_and_heals_under_current_secret() {
+        let (old, cur) = ("old-secret", "cur-secret");
+        let spec = parse_spec(&serde_json::json!({ "min": 1, "max": 1 })).unwrap();
+        let stored = StoredSchedule {
+            pat: "pat".into(),
+            spec,
+            last_run: date!(2026-08-28),
+            created_at: "2026-08-01".into(),
+        };
+        let blob = crate::crypto::encrypt_json_with_iv(old, &stored, &[0u8; 12]).unwrap();
+        let store = MemStore { recs: Mutex::new(vec![("u".into(), "s1".into(), blob)]) };
+        let log = |_: &str| {};
+        let mock = Mock { responses: Mutex::new(gh_responses(1)) };
+        let mut rng = |lo: u32, _hi: u32| lo;
+        let r = crate::block_on(run_due_schedules_limited(
+            &mock,
+            &store,
+            &Secrets { current: cur, old: Some(old) },
+            date!(2026-08-29),
+            &mut rng,
+            &log,
+            RunLimits::none(),
+        ))
+        .unwrap();
+        assert_eq!((r.schedules, r.ran, r.commits, r.failed, r.deferred), (1, 1, 1, 0, 0));
+        let payload = crate::block_on(store.get("u", "s1")).unwrap().unwrap();
+        let healed: StoredSchedule = crate::crypto::decrypt_json(cur, &payload)
+            .expect("the store-back must re-encrypt under the current secret");
+        assert_eq!(healed.last_run, date!(2026-08-29));
+    }
+
+    /// Without the fallback configured, a rotated record stays
+    /// skipped-failed: the runner never writes or re-stores it.
+    #[test]
+    fn old_secret_record_fails_closed_without_fallback() {
+        let (old, cur) = ("old-secret", "cur-secret");
+        let spec = parse_spec(&serde_json::json!({ "min": 1, "max": 1 })).unwrap();
+        let stored = StoredSchedule {
+            pat: "pat".into(),
+            spec,
+            last_run: date!(2026-08-28),
+            created_at: "2026-08-01".into(),
+        };
+        let blob = crate::crypto::encrypt_json_with_iv(old, &stored, &[0u8; 12]).unwrap();
+        let store = MemStore { recs: Mutex::new(vec![("u".into(), "s1".into(), blob)]) };
+        let log = |_: &str| {};
+        // empty mock: a skipped record must not touch GitHub at all
+        let mock = Mock { responses: Mutex::new(VecDeque::new()) };
+        let mut rng = |lo: u32, _hi: u32| lo;
+        let r = crate::block_on(run_due_schedules_limited(
+            &mock,
+            &store,
+            &Secrets { current: cur, old: None },
+            date!(2026-08-29),
+            &mut rng,
+            &log,
+            RunLimits::none(),
+        ))
+        .unwrap();
+        assert_eq!((r.schedules, r.ran, r.commits, r.failed, r.deferred), (1, 0, 0, 1, 0));
+        let payload = crate::block_on(store.get("u", "s1")).unwrap().unwrap();
+        assert!(crate::crypto::decrypt_json::<StoredSchedule>(cur, &payload).is_err());
+        let unchanged: StoredSchedule = crate::crypto::decrypt_json(old, &payload).unwrap();
+        assert_eq!(unchanged.last_run, date!(2026-08-28), "no re-store without a run");
     }
 
     #[test]

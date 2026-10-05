@@ -26,12 +26,26 @@ fn cipher(secret: &str) -> Aes256Gcm {
 /// not crypto-secure, and GCM nonce reuse is catastrophic). Hard-fails
 /// rather than ever encrypting with a repeatable nonce.
 pub fn random_iv(_rt: &dyn Runtime) -> [u8; 12] {
+    fresh_iv()
+}
+
+fn fresh_iv() -> [u8; 12] {
     let mut iv = [0u8; 12];
     getrandom::getrandom(&mut iv).expect("OS entropy unavailable");
     iv
 }
 
-pub fn encrypt_json(
+/// Production encryption: draws a fresh OS-entropy nonce per call so
+/// the API offers no way to reuse one (GCM nonce reuse is catastrophic;
+/// every production caller already passed `random_iv`, so the footgun
+/// is now structural).
+pub fn encrypt_json(secret: &str, value: &impl Serialize) -> Result<String, Error> {
+    encrypt_json_with_iv(secret, value, &fresh_iv())
+}
+
+/// Fixed-nonce encryption for deterministic tests only; production
+/// code must stick to `encrypt_json`, which never reuses a nonce.
+pub fn encrypt_json_with_iv(
     secret: &str,
     value: &impl Serialize,
     iv: &[u8; 12],
@@ -104,7 +118,7 @@ mod tests {
     #[test]
     fn roundtrip() {
         let value = serde_json::json!({ "pat": "x", "n": 3 });
-        let blob = encrypt_json(SECRET, &value, &[7u8; 12]).unwrap();
+        let blob = encrypt_json_with_iv(SECRET, &value, &[7u8; 12]).unwrap();
         assert!(blob.starts_with("v1."));
         let back: serde_json::Value = decrypt_json(SECRET, &blob).unwrap();
         assert_eq!(back, value);
@@ -112,8 +126,24 @@ mod tests {
 
     #[test]
     fn wrong_secret_fails() {
-        let blob = encrypt_json(SECRET, &serde_json::json!({ "a": 1 }), &[1u8; 12]).unwrap();
+        let blob =
+            encrypt_json_with_iv(SECRET, &serde_json::json!({ "a": 1 }), &[1u8; 12]).unwrap();
         assert!(decrypt_json::<serde_json::Value>("other", &blob).is_err());
+    }
+
+    /// `encrypt_json` draws a fresh nonce internally: encrypting the
+    /// same plaintext twice never reuses one (the IV is the first
+    /// blob segment, so equal blobs would mean equal nonces).
+    #[test]
+    fn encrypt_json_rotates_nonces_per_call() {
+        let value = serde_json::json!({ "pat": "x" });
+        let a = encrypt_json(SECRET, &value).unwrap();
+        let b = encrypt_json(SECRET, &value).unwrap();
+        assert_ne!(a, b, "two encryptions must not share a nonce");
+        for blob in [a, b] {
+            let back: serde_json::Value = decrypt_json(SECRET, &blob).unwrap();
+            assert_eq!(back, value);
+        }
     }
 
     #[test]

@@ -1,9 +1,11 @@
 use std::cell::Cell;
+use std::future::Future;
+use std::pin::Pin;
 use std::rc::Rc;
 use std::time::Duration;
 
 use gitlarp_core::plan::Caps;
-use gitlarp_core::runner::RunLimits;
+use gitlarp_core::runner::{RunLimits, Secrets};
 use gitlarp_core::schedule::ScheduleSpec;
 use gitlarp_core::serde_json::{json, Value};
 use gitlarp_core::{
@@ -39,21 +41,30 @@ pub const MIN_SECRET_LEN: usize = 16;
 mod policy {
     use super::{MIN_SECRET_LEN, ScheduleSpec};
 
+    /// CORS headers stamped on every response (the widget embeds
+    /// this API cross-origin); every API path also has a same-path
+    /// OPTIONS route so browsers' preflights get them instead of a
+    /// bare 405.
+    pub const CORS_HEADERS: &[(&str, &str)] = &[
+        ("Access-Control-Allow-Origin", "*"),
+        ("Access-Control-Allow-Methods", "GET, POST, OPTIONS, DELETE"),
+        ("Access-Control-Allow-Headers", "Content-Type, Authorization"),
+    ];
+
     /// Core errors with status 400–499 pass through verbatim; anything
     /// else (5xx, 0, unknown) → 502.
     pub fn core_status(status: u16) -> u16 {
         if (400..500).contains(&status) { status } else { 502 }
     }
 
-    /// `Authorization: Bearer <PAT>` wins over the legacy `?pat=` query.
-    /// Empty/absent header falls through to the query; neither → None.
-    pub fn extract_pat(auth_header: Option<&str>, query_pat: Option<&str>) -> Option<String> {
-        if let Some(token) = auth_header.and_then(|h| h.strip_prefix("Bearer ")) {
-            if !token.is_empty() {
-                return Some(token.to_string());
-            }
-        }
-        query_pat.filter(|p| !p.is_empty()).map(|p| p.to_string())
+    /// `Authorization: Bearer <PAT>` only — the legacy `?pat=` query
+    /// fallback is gone (PATs leak via browser history, proxy logs,
+    /// and Referer headers); no usable header → None.
+    pub fn extract_pat(auth_header: Option<&str>) -> Option<String> {
+        auth_header
+            .and_then(|h| h.strip_prefix("Bearer "))
+            .filter(|t| !t.is_empty())
+            .map(str::to_string)
     }
 
     /// Run endpoint fails closed: secret unset → 503 (never execute),
@@ -144,22 +155,18 @@ mod policy {
         }
 
         #[test]
-        fn pat_header_wins_over_query() {
-            assert_eq!(extract_pat(Some("Bearer h"), Some("q")), Some("h".into()));
+        fn pat_comes_from_bearer_header() {
+            assert_eq!(extract_pat(Some("Bearer h")), Some("h".into()));
         }
 
+        /// No usable header — including what used to be query-only
+        /// requests — yields None, which handlers answer with 400
+        /// "missing pat".
         #[test]
-        fn pat_query_used_when_no_usable_header() {
-            assert_eq!(extract_pat(None, Some("q")), Some("q".into()));
-            assert_eq!(extract_pat(Some("Basic x"), Some("q")), Some("q".into()));
-            assert_eq!(extract_pat(Some("Bearer "), Some("q")), Some("q".into()));
-        }
-
-        #[test]
-        fn pat_none_when_neither_present() {
-            assert_eq!(extract_pat(None, None), None);
-            assert_eq!(extract_pat(Some("Bearer "), Some("")), None);
-            assert_eq!(extract_pat(Some("Basic x"), None), None);
+        fn pat_missing_when_no_usable_header() {
+            assert_eq!(extract_pat(None), None);
+            assert_eq!(extract_pat(Some("Bearer ")), None);
+            assert_eq!(extract_pat(Some("Basic x")), None);
         }
 
         #[test]
@@ -299,7 +306,8 @@ fn random_bytes(buf: &mut [u8]) {
     arr.copy_to(buf);
 }
 
-// ---- D1Store: port of apps/web/src/lib/store.ts d1Store() ----
+// ---- D1Store: port of the original TS d1Store() from
+// apps/web/src/lib/store.ts, since removed from the web app ----
 
 struct D1Store {
     db: SendWrapper<Rc<worker::D1Database>>,
@@ -441,9 +449,9 @@ impl store::Store for D1Store {
 
 fn cors(mut res: Response) -> Response {
     let h = res.headers_mut();
-    let _ = h.set("Access-Control-Allow-Origin", "*");
-    let _ = h.set("Access-Control-Allow-Methods", "GET, POST, OPTIONS, DELETE");
-    let _ = h.set("Access-Control-Allow-Headers", "Content-Type, Authorization");
+    for (k, v) in policy::CORS_HEADERS {
+        let _ = h.set(k, v);
+    }
     res
 }
 
@@ -474,7 +482,7 @@ fn schedule_secret(env: &Env) -> Option<String> {
                 true
             } else {
                 console_error!(
-                    "[gitlarp] GITLARP_SCHEDULE_SECRET is shorter than {MIN_SECRET_LEN} chars; \
+                    "[gitlarp] GITLARP_SCHEDULE_SECRET is shorter than {MIN_SECRET_LEN} bytes; \
                      schedule features are disabled (fail closed)"
                 );
                 false
@@ -596,10 +604,13 @@ async fn rate_gate(env: &Env, req: &Request) -> worker::Result<Option<Response>>
 // ---- routes ----
 
 /// Runner with worker policy: the run is limited to WORKER_PER_RUN
-/// commits per schedule record (with deferred days staying due; see
-/// runner::RunLimits), and per-day counts are capped at the same
-/// budget so records created elsewhere (or before this cap existed)
-/// cannot blow the subrequest ceiling either.
+/// commits per schedule record and — the ~50-fetch subrequest
+/// ceiling is per cron INVOCATION, not per record — to the same
+/// budget shared across every record, with deferred days and
+/// records staying due (see runner::RunLimits). Per-day counts are
+/// capped at the same budget so records created elsewhere (or
+/// before this cap existed) cannot blow the subrequest ceiling
+/// either.
 async fn run_schedules(
     rt: &dyn Runtime,
     store: &dyn store::Store,
@@ -615,11 +626,16 @@ async fn run_schedules(
     runner::run_due_schedules_limited(
         rt,
         store,
-        secret,
+        // no old-secret support on the worker: rotated records stay
+        // skipped until a GET /api/schedules heals them
+        &Secrets { current: secret, old: None },
         today,
         &mut rng,
         &log,
-        RunLimits { max_commits_per_run: WORKER_PER_RUN },
+        RunLimits {
+            max_commits_per_run: WORKER_PER_RUN,
+            max_commits_total: Some(WORKER_PER_RUN),
+        },
     )
     .await
 }
@@ -628,10 +644,7 @@ async fn options(_req: Request, _ctx: RouteContext<()>) -> worker::Result<Respon
     Ok(cors(Response::empty()?.with_status(204)))
 }
 
-async fn commits(mut req: Request, ctx: RouteContext<()>) -> worker::Result<Response> {
-    if let Some(resp) = rate_gate(&ctx.env, &req).await? {
-        return Ok(resp);
-    }
+async fn commits(mut req: Request, _ctx: RouteContext<()>) -> worker::Result<Response> {
     let body = match req.json::<Value>().await {
         Ok(v) => v,
         Err(_) => return err_json("invalid JSON", 400),
@@ -667,8 +680,7 @@ async fn commits(mut req: Request, ctx: RouteContext<()>) -> worker::Result<Resp
 
 async fn graph(req: Request, _ctx: RouteContext<()>) -> worker::Result<Response> {
     let auth = req.headers().get("Authorization").ok().flatten();
-    let qpat = q(&req, "pat");
-    let Some(pat) = policy::extract_pat(auth.as_deref(), qpat.as_deref()) else {
+    let Some(pat) = policy::extract_pat(auth.as_deref()) else {
         return err_json("missing pat", 400);
     };
     let gh = gh::GhClient::new(&WorkerRuntime, &pat, gh::DEFAULT_REPO);
@@ -686,8 +698,7 @@ async fn graph(req: Request, _ctx: RouteContext<()>) -> worker::Result<Response>
 
 async fn schedules_get(req: Request, ctx: RouteContext<()>) -> worker::Result<Response> {
     let auth = req.headers().get("Authorization").ok().flatten();
-    let qpat = q(&req, "pat");
-    let Some(pat) = policy::extract_pat(auth.as_deref(), qpat.as_deref()) else {
+    let Some(pat) = policy::extract_pat(auth.as_deref()) else {
         return err_json("missing pat", 400);
     };
     let Some(secret) = schedule_secret(&ctx.env) else {
@@ -721,9 +732,6 @@ async fn schedules_get(req: Request, ctx: RouteContext<()>) -> worker::Result<Re
 }
 
 async fn schedules_post(mut req: Request, ctx: RouteContext<()>) -> worker::Result<Response> {
-    if let Some(resp) = rate_gate(&ctx.env, &req).await? {
-        return Ok(resp);
-    }
     let body = match req.json::<Value>().await {
         Ok(v) => v,
         Err(_) => return err_json("invalid JSON", 400),
@@ -759,7 +767,7 @@ async fn schedules_post(mut req: Request, ctx: RouteContext<()>) -> worker::Resu
             created_at: now,
         };
         let id = uuid()?;
-        let blob = crypto::encrypt_json(&secret, &data, &crypto::random_iv(&WorkerRuntime))?;
+        let blob = crypto::encrypt_json(&secret, &data)?;
         store.put(&user, &id, &blob).await?;
         Ok::<_, CoreError>(json!({ "id": id }))
     }
@@ -771,12 +779,8 @@ async fn schedules_post(mut req: Request, ctx: RouteContext<()>) -> worker::Resu
 }
 
 async fn schedules_delete(req: Request, ctx: RouteContext<()>) -> worker::Result<Response> {
-    if let Some(resp) = rate_gate(&ctx.env, &req).await? {
-        return Ok(resp);
-    }
     let auth = req.headers().get("Authorization").ok().flatten();
-    let qpat = q(&req, "pat");
-    let Some(pat) = policy::extract_pat(auth.as_deref(), qpat.as_deref()) else {
+    let Some(pat) = policy::extract_pat(auth.as_deref()) else {
         return err_json("need pat and id", 400);
     };
     let Some(id) = q(&req, "id").filter(|i| !i.is_empty()) else {
@@ -803,9 +807,6 @@ async fn schedules_delete(req: Request, ctx: RouteContext<()>) -> worker::Result
 }
 
 async fn schedules_run(req: Request, ctx: RouteContext<()>) -> worker::Result<Response> {
-    if let Some(resp) = rate_gate(&ctx.env, &req).await? {
-        return Ok(resp);
-    }
     let secret = schedule_secret(&ctx.env);
     let auth = req.headers().get("Authorization").ok().flatten();
     match policy::run_gate(secret.as_deref(), auth.as_deref()) {
@@ -835,23 +836,99 @@ async fn healthz(_req: Request, _ctx: RouteContext<()>) -> worker::Result<Respon
     json_res(json!({ "ok": true }), 200)
 }
 
-// ---- entry points ----
+// ---- route table + entry points -----------------------------------------
+// The route table is data: the handlers are wasm-bound (Request/Env
+// only run inside the Workers runtime), so registration, CORS
+// preflight coverage, and rate-gate wiring live here where the host
+// test suite can pin them.
+
+/// The future every route returns; boxed so all handler fns share
+/// one registration shape.
+type RouteFut = Pin<Box<dyn Future<Output = worker::Result<Response>>>>;
+type RouteFn = Box<dyn Fn(Request, RouteContext<()>) -> RouteFut>;
+
+/// Which handler a route dispatches to; every handler fn has the
+/// same worker-rs signature, so the table stores a tag.
+#[derive(Clone, Copy)]
+enum H {
+    Healthz,
+    Commits,
+    Options,
+    Graph,
+    SchedulesGet,
+    SchedulesPost,
+    SchedulesDelete,
+    SchedulesRun,
+}
+
+struct Route {
+    method: Method,
+    path: &'static str,
+    /// Gated rows consult the D1 rate limiter before their handler:
+    /// every route that talks to upstream GitHub burns the 30/min
+    /// window. Preflights and healthz stay exempt — they cost
+    /// nothing, and browsers send preflights mechanically.
+    gated: bool,
+    handler: H,
+}
+
+const ROUTES: &[Route] = &[
+    Route { method: Method::Get, path: "/healthz", gated: false, handler: H::Healthz },
+    Route { method: Method::Post, path: "/api/commits", gated: true, handler: H::Commits },
+    Route { method: Method::Options, path: "/api/commits", gated: false, handler: H::Options },
+    Route { method: Method::Get, path: "/api/graph", gated: true, handler: H::Graph },
+    Route { method: Method::Options, path: "/api/graph", gated: false, handler: H::Options },
+    Route { method: Method::Get, path: "/api/schedules", gated: true, handler: H::SchedulesGet },
+    Route { method: Method::Post, path: "/api/schedules", gated: true, handler: H::SchedulesPost },
+    Route { method: Method::Delete, path: "/api/schedules", gated: true, handler: H::SchedulesDelete },
+    Route { method: Method::Options, path: "/api/schedules", gated: false, handler: H::Options },
+    Route { method: Method::Post, path: "/api/schedules/run", gated: true, handler: H::SchedulesRun },
+    Route { method: Method::Options, path: "/api/schedules/run", gated: false, handler: H::Options },
+];
+
+/// The closure registered per row: gated rows consult the limiter
+/// first (429 + Retry-After once the window budget is spent), then
+/// dispatch on the tag.
+fn route(r: &'static Route) -> RouteFn {
+    Box::new(move |req: Request, ctx: RouteContext<()>| {
+        let fut: RouteFut = Box::pin(async move {
+            if r.gated {
+                if let Some(resp) = rate_gate(&ctx.env, &req).await? {
+                    return Ok(resp);
+                }
+            }
+            match r.handler {
+                H::Healthz => healthz(req, ctx).await,
+                H::Commits => commits(req, ctx).await,
+                H::Options => options(req, ctx).await,
+                H::Graph => graph(req, ctx).await,
+                H::SchedulesGet => schedules_get(req, ctx).await,
+                H::SchedulesPost => schedules_post(req, ctx).await,
+                H::SchedulesDelete => schedules_delete(req, ctx).await,
+                H::SchedulesRun => schedules_run(req, ctx).await,
+            }
+        });
+        fut
+    })
+}
+
+fn build_router() -> Router<'static, ()> {
+    let mut router: Router<'static, ()> = Router::new();
+    for r in ROUTES {
+        router = match r.method {
+            Method::Get => router.get_async(r.path, route(r)),
+            Method::Post => router.post_async(r.path, route(r)),
+            Method::Delete => router.delete_async(r.path, route(r)),
+            Method::Options => router.options_async(r.path, route(r)),
+            _ => unreachable!("the route table only registers these methods"),
+        };
+    }
+    router
+}
 
 #[event(fetch)]
 async fn main(req: Request, env: Env, _ctx: worker::Context) -> worker::Result<Response> {
-    Router::new()
-        .get_async("/healthz", healthz)
-        .post_async("/api/commits", commits)
-        .options_async("/api/commits", options)
-        .get_async("/api/graph", graph)
-        .get_async("/api/schedules", schedules_get)
-        .post_async("/api/schedules", schedules_post)
-        .delete_async("/api/schedules", schedules_delete)
-        .options_async("/api/schedules", options)
-        .post_async("/api/schedules/run", schedules_run)
-        .options_async("/api/schedules/run", options)
-        .run(req, env)
-        .await
+    build_router().run(req, env).await
 }
 
 #[event(scheduled)]
@@ -881,5 +958,111 @@ async fn scheduled(event: worker::ScheduledEvent, env: Env, _ctx: worker::Schedu
     match run_schedules(&rt, &store, secret.as_deref().unwrap_or(""), today).await {
         Ok(r) => console_log!("[gitlarp] scheduled run: {r:?}"),
         Err(e) => console_error!("[gitlarp] scheduled failed: {e}"),
+    }
+}
+
+// ---- host tests ---------------------------------------------------------
+// Request/Env/Router are wasm-bound, so the host suite pins the route
+// table those handlers hang off of: registration, preflight coverage,
+// and rate-gate wiring are all data in ROUTES.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn registered(method: Method, path: &str) -> bool {
+        ROUTES.iter().any(|r| r.method == method && r.path == path)
+    }
+
+    /// The table registers cleanly: a duplicate or conflicting pattern
+    /// would panic inside matchit at registration, so wiring the
+    /// router once on host catches table typos before deploy.
+    #[test]
+    fn route_table_registers_without_conflicts() {
+        let _router = build_router();
+    }
+
+    /// The exact (method, path) set the worker serves; the widget and
+    /// scripts call every one of these, and the graph preflight went
+    /// missing once already (browsers got a bare 405).
+    #[test]
+    fn route_table_matches_the_public_api() {
+        let served: Vec<String> =
+            ROUTES.iter().map(|r| format!("{:?} {}", r.method, r.path)).collect();
+        for route in [
+            "Get /healthz",
+            "Post /api/commits",
+            "Options /api/commits",
+            "Get /api/graph",
+            "Options /api/graph",
+            "Get /api/schedules",
+            "Post /api/schedules",
+            "Delete /api/schedules",
+            "Options /api/schedules",
+            "Post /api/schedules/run",
+            "Options /api/schedules/run",
+        ] {
+            assert!(served.contains(&route.to_string()), "missing route {route}");
+        }
+        assert_eq!(served.len(), 11, "no stray routes: {served:?}");
+    }
+
+    /// Cross-origin widget fetches preflight every request that carries
+    /// an Authorization header; an unregistered OPTIONS method gets a
+    /// bare 405 with no CORS headers and the browser never sends the
+    /// real request. Every API path needs a same-path preflight
+    /// (healthz is exempt: a safelisted simple GET).
+    #[test]
+    fn every_api_path_answers_preflight() {
+        let api_paths: Vec<&str> = ROUTES
+            .iter()
+            .filter(|r| r.method != Method::Options && r.path != "/healthz")
+            .map(|r| r.path)
+            .collect();
+        assert!(!api_paths.is_empty());
+        for path in api_paths {
+            assert!(registered(Method::Options, path), "no preflight for {path}");
+        }
+        assert!(
+            registered(Method::Options, "/api/graph"),
+            "the widget reads /api/graph cross-origin"
+        );
+    }
+
+    /// The preflight handler answers with the headers browsers need to
+    /// send the real cross-origin request: any origin, the registered
+    /// methods (incl. OPTIONS), and the Authorization header the API
+    /// authenticates with.
+    #[test]
+    fn preflight_headers_allow_origin_methods_and_authorization() {
+        let get = |k: &str| {
+            policy::CORS_HEADERS
+                .iter()
+                .find(|(name, _)| *name == k)
+                .map(|(_, v)| *v)
+                .unwrap_or_default()
+        };
+        assert_eq!(get("Access-Control-Allow-Origin"), "*");
+        assert!(get("Access-Control-Allow-Methods").contains("OPTIONS"));
+        assert!(get("Access-Control-Allow-Headers").contains("Authorization"));
+    }
+
+    /// Every route that talks to upstream GitHub burns the 30/min
+    /// window — graph and schedules_get included, which is what the
+    /// 429 + Retry-After denial hangs off of. Preflights and healthz
+    /// never do: browsers send preflights mechanically, and healthz
+    /// must stay up while an IP is throttled.
+    #[test]
+    fn upstream_talking_routes_are_rate_gated() {
+        for r in ROUTES {
+            let gated = r.method != Method::Options && r.path != "/healthz";
+            assert_eq!(
+                r.gated, gated,
+                "{:?} {} is wrongly {}",
+                r.method,
+                r.path,
+                if gated { "ungated" } else { "gated" }
+            );
+        }
     }
 }
