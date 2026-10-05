@@ -73,7 +73,10 @@ record() {
 export GITLARP_SCHEDULE_SECRET=${GITLARP_SCHEDULE_SECRET:-$(openssl rand -base64 32)}
 
 echo "building images (this can take a few minutes)..."
-if compose build --quiet; then
+# serial, not parallel: the server image is a full Rust release build
+# and the web image runs `next build`; in parallel they can exhaust a
+# small Docker VM and fail spuriously (observed on a cold daemon)
+if compose build --quiet server && compose build --quiet web; then
   record build 0 "server + web images built"
 else
   record build 1 "docker compose build failed"
