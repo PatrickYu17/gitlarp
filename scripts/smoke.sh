@@ -16,13 +16,23 @@ export GITHUB_TOKEN=$SMOKE_PAT
 command -v gh >/dev/null 2>&1 || { echo "FAIL: gh CLI is required"; exit 1; }
 gh auth setup-git >/dev/null 2>&1 || true
 
-REPO=gitlarp-smoke
-cleanup() { gh repo delete "$SMOKE_LOGIN/$REPO" --yes >/dev/null 2>&1 || true; }
+# unique per run: a pre-existing repo is never touched, and the exit
+# trap never deletes a repo this run did not create
+REPO="gitlarp-smoke-$$-$RANDOM"
+CREATED=0
+cleanup() {
+  if [ "$CREATED" = 1 ]; then
+    gh repo delete "$SMOKE_LOGIN/$REPO" --yes >/dev/null 2>&1 || true
+  fi
+}
 trap cleanup EXIT
 
-cleanup
-gh repo create "$REPO" --private >/dev/null 2>&1 ||
-  { echo "FAIL: could not create github.com/$SMOKE_LOGIN/$REPO"; exit 1; }
+if gh repo create "$REPO" --private >/dev/null 2>&1; then
+  CREATED=1
+else
+  echo "FAIL: could not create github.com/<login>/$REPO"
+  exit 1
+fi
 
 printf '%-22s %-5s %s\n' probe status note
 printf '%-22s %-5s %s\n' ----- ----- ----
@@ -30,7 +40,10 @@ FAILS=0
 record() {
   status=PASS
   [ "$2" = 0 ] || { status=FAIL; FAILS=$((FAILS + 1)); }
-  printf '%-22s %-5s %s\n' "$1" "$status" "$3"
+  # notes can carry upstream errors quoting /repos/<login>/... URLs;
+  # never let the real login reach the (public CI) log
+  note=$(printf '%s' "$3" | sed "s/$SMOKE_LOGIN/<login>/g")
+  printf '%-22s %-5s %s\n' "$1" "$status" "$note"
 }
 
 export GITLARP_HOME=$(mktemp -d)
@@ -70,7 +83,7 @@ BASE="https://api.github.com/repos/$SMOKE_LOGIN/$REPO"
 if curl -sf -H "$AUTH" "$BASE/branches/main" >/dev/null; then
   record "branch main exists" 0 ""
 else
-  record "branch main exists" 1 "branch main not found on $SMOKE_LOGIN/$REPO"
+  record "branch main exists" 1 "branch main not found on <login>/$REPO"
 fi
 
 commits=$(curl -sf -H "$AUTH" "$BASE/commits?per_page=100" || true)
@@ -136,5 +149,5 @@ if [ "$FAILS" -eq 0 ]; then
 else
   echo "FAIL: $FAILS probe(s) red"
 fi
-echo "graph check: open github.com/$SMOKE_LOGIN?tab=contributions: commits appear within minutes (private contributions must be on)"
+echo "graph check: open github.com/<login>?tab=contributions: commits appear within minutes (private contributions must be on)"
 exit "$FAILS"
