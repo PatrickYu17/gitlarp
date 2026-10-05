@@ -23,6 +23,10 @@
         "typescript": "^5.9.0",
         "wrangler": "^4.125.0",
       },
+      "optionalDependencies": {
+        "@next/swc-linux-arm64-gnu": "16.3.2",
+        "@next/swc-linux-x64-gnu": "16.3.2",
+      },
     },
   },
   "trustedDependencies": [
@@ -158,6 +162,10 @@
     "@next/env": ["@next/env@16.3.2", "", {}, ""],
 
     "@next/swc-darwin-arm64": ["@next/swc-darwin-arm64@16.3.2", "", { "os": "darwin", "cpu": "arm64" }, ""],
+
+    "@next/swc-linux-arm64-gnu": ["@next/swc-linux-arm64-gnu@16.3.2", "", { "os": "linux", "cpu": "arm64" }, "sha512-vqsgb6FAOzcrCccsLXiKtAy5t8EzO+uOazuFaSkQxeY0tNONG3vpHYy8pyBafcI5SNFPTeyard6yTr6SzNGo2A=="],
+
+    "@next/swc-linux-x64-gnu": ["@next/swc-linux-x64-gnu@16.3.2", "", { "os": "linux", "cpu": "x64" }, "sha512-Fe0SA2j8X0kmc3aveuHD7UktO3AE2+mH3LguP60vGbz7u0z+MrDXbeb5iZFYAwR7EzzzXJ2Yk966w9mGTFMqfA=="],
 
     "@noble/ciphers": ["@noble/ciphers@1.3.0", "", {}, ""],
 

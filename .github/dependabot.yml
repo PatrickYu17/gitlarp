@@ -1,4 +1,8 @@
 version: 2
+# Minor/patch updates are grouped and kept green. Major bumps are
+# ignored: they break the build (API changes) and this repo's
+# dependency set is deliberately small and pinned. Security updates
+# bypass ignore rules and still raise PRs.
 updates:
   - package-ecosystem: "cargo"
     directory: "/"
@@ -8,6 +12,9 @@ updates:
     groups:
       minor-and-patch:
         update-types: ["minor", "patch"]
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: "cargo"
     directory: "/apps/worker"
     # Separate wasm workspace lockfile
@@ -16,6 +23,9 @@ updates:
     groups:
       minor-and-patch:
         update-types: ["minor", "patch"]
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: "npm"
     directory: "/"
     # bun.lock at the root covers the workspaces (bun is handled by the npm ecosystem)
@@ -24,3 +34,6 @@ updates:
     groups:
       minor-and-patch:
         update-types: ["minor", "patch"]
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
