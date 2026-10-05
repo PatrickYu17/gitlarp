@@ -10,8 +10,5 @@
     "dev": "bun run --filter gitlarp-web dev",
     "deploy-web": "bun run --filter gitlarp-web deploy",
     "install-cli": "bun run --filter gitlarp-cli install-cli"
-  },
-  "optionalDependencies": {
-    "@esbuild/linux-x64": "0.28.1"
   }
 }
