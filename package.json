@@ -10,5 +10,8 @@
     "dev": "bun run --filter gitlarp-web dev",
     "deploy-web": "bun run --filter gitlarp-web deploy",
     "install-cli": "bun run --filter gitlarp-cli install-cli"
+  },
+  "overrides": {
+    "esbuild": "0.25.4"
   }
 }
