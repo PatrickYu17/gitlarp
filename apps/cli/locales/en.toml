@@ -19,6 +19,7 @@ usage = [
   "flags:",
   "  --force    allow out-of-window dates and up to 1000 commits/day",
   "  --dry-run  print the plan without committing",
+  "  --jitter   stamp commits at a random time within the day (default: 12:00 UTC)",
   "",
   "requires: gh CLI installed and authenticated (gh auth login)",
   "",

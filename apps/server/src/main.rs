@@ -298,11 +298,25 @@ async fn commits_post(
         Ok(p) => p,
         Err(e) => return core_error(e),
     };
+    // jitter: absent/null/false = fixed noon stamp; true = random
+    // second-of-day per commit (engine::CommitOptions)
+    let jitter = match body.get("jitter") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(b)) => *b,
+        Some(_) => return bad_request("jitter must be a boolean"),
+    };
     // serialize against the runner and the hourly loop: interleaved
     // engine runs lose commits to force-patched refs
     let _write = state.write_lock.lock().await;
-    match engine::write_commits(state.rt.as_ref(), pat, gh::DEFAULT_REPO, &plan.days, None)
-        .await
+    match engine::write_commits_opts(
+        state.rt.as_ref(),
+        pat,
+        gh::DEFAULT_REPO,
+        &plan.days,
+        None,
+        engine::CommitOptions { jitter },
+    )
+    .await
     {
         Ok(res) => {
             let mut out = json!({ "created": res.created, "total": res.total });
@@ -928,6 +942,49 @@ mod tests {
         let (status, v) = call_json(&app, req).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(v["error"].as_str().unwrap().contains("cap"));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    // -- (b3) commit jitter -------------------------------------------------
+
+    /// `"jitter": true` must wire through to engine::CommitOptions; the
+    /// mock doesn't inspect timestamps, so exact instants are covered
+    /// by the core engine tests — here we prove the flag is accepted
+    /// and the run still succeeds.
+    #[actix_web::test]
+    async fn commits_accept_jitter_true() {
+        let dir = temp_root();
+        let state = test_state(dir.clone(), Some("S"), None, true);
+        let app = test::init_service(build_app(state)).await;
+        let today = date::fmt(date::today_utc());
+        let req = TestRequest::post()
+            .uri("/api/commits")
+            .set_json(json!({ "pat": "p1", "jitter": true, "days": [
+                { "date": today, "count": 2 }
+            ] }))
+            .to_request();
+        let (status, v) = call_json(&app, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(v["created"], 2);
+        assert_eq!(v["total"], 2);
+        assert!(v.get("partial").is_none());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[actix_web::test]
+    async fn commits_reject_non_boolean_jitter() {
+        let dir = temp_root();
+        let state = test_state(dir.clone(), Some("S"), None, true);
+        let app = test::init_service(build_app(state)).await;
+        let req = TestRequest::post()
+            .uri("/api/commits")
+            .set_json(json!({ "pat": "p1", "jitter": "yes", "days": [
+                { "date": date::fmt(date::today_utc()), "count": 1 }
+            ] }))
+            .to_request();
+        let (status, v) = call_json(&app, req).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(v["error"], "jitter must be a boolean");
         std::fs::remove_dir_all(dir).ok();
     }
 

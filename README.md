@@ -40,8 +40,9 @@ gitlarp wipe
 - `wipe`: reset the repo to `gitlarp-base`, undoing every larp commit
 - `--dry-run`: print the plan without committing or pushing
 - `--force`: allow out-of-window dates and >100 commits/day (cap becomes 1000)
+- `--jitter`: stamp commits at a random time within the day instead of 12:00 UTC
 
-Dates are clamped to the rolling 12-month window; commits are stamped 12:00 UTC. The repo is private and stays private.
+Dates are clamped to the rolling 12-month window; commits are stamped 12:00 UTC — or at a random time within the day with `--jitter`. The repo is private and stays private.
 
 ## Scheduling (auto-pilot)
 
@@ -153,6 +154,7 @@ curl -X POST https://your-server.app/api/commits \
 - dates are `YYYY-MM-DD`; out-of-window dates are clamped to the rolling 12 months and counted in `clamped`
 - caps: 500 commits per request, 500 per day on `apps/server`; the Cloudflare worker enforces its own caps (40 per request, 40 per day) because Workers allows ~50 upstream fetches per invocation on the free plan — larger requests fail fast with a 400. Work is chunked into ≤50-commit sub-batches with ~1s delays; 403/429 retried once
 - the private repo `gitlarp-history` is auto-created on first use
+- optional `"jitter": true` stamps each commit at a uniform random time within its day instead of exactly 12:00 UTC (the CLI equivalent is `--jitter`)
 - full success: `{"created":3,"total":3}`
 - partial failure: `{"created":2,"total":3,"partial":true,"error":"..."}`
 - clamped dates add `"clamped":1`

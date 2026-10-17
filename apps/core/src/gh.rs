@@ -140,6 +140,7 @@ impl<'a> GhClient<'a> {
             .ok_or_else(|| Error::new(502, "tree create returned no sha"))
     }
 
+    /// Commit stamped at 12:00:00Z of `date`.
     pub async fn create_commit(
         &self,
         login: &str,
@@ -148,8 +149,23 @@ impl<'a> GhClient<'a> {
         tree_sha: &str,
         parent: Option<&str>,
     ) -> Result<String, Error> {
+        self.create_commit_at(login, email, date, &format!("{date}T12:00:00Z"), tree_sha, parent)
+            .await
+    }
+
+    /// `create_commit` with an explicit author/committer instant. `ts` is a
+    /// full `YYYY-MM-DDTHH:MM:SSZ` timestamp; the commit message stays the
+    /// plain `date`.
+    pub async fn create_commit_at(
+        &self,
+        login: &str,
+        email: &str,
+        date: &str,
+        ts: &str,
+        tree_sha: &str,
+        parent: Option<&str>,
+    ) -> Result<String, Error> {
         let path = format!("/repos/{login}/{}/git/commits", self.repo);
-        let ts = format!("{date}T12:00:00Z");
         let body = json!({
             "message": date,
             "tree": tree_sha,
