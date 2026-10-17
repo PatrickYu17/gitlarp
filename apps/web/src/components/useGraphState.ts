@@ -47,6 +47,7 @@ export function useGraphState({
   const [graphErr, setGraphErr] = useState("");
   const [loading, setLoading] = useState(false);
   const [attempt, setAttempt] = useState(0);
+  const [jitter, setJitter] = useState(false);
 
   const resolvedBase = useMemo(
     () => resolveApiBase({ session: apiInput, env: process.env.NEXT_PUBLIC_GITLARP_API_URL }),
@@ -137,7 +138,7 @@ export function useGraphState({
       const res = await fetch(`${apiBase}/api/commits`, {
         method: "POST",
         headers: { Authorization: `Bearer ${pat}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ pat, days: planDays }),
+        body: JSON.stringify({ pat, days: planDays, ...(jitter ? { jitter: true } : {}) }),
       });
       let body: {
         created?: number;
@@ -174,6 +175,41 @@ export function useGraphState({
             setCounts(next);
           }
         }
+      }
+    } catch (e) {
+      outcome = { ok: false, text: e instanceof Error ? e.message : String(e) };
+    }
+    if (!outcome.ok) setError(outcome.text);
+    setBusy(false);
+    return outcome;
+  };
+
+  /** DELETE /api/commits: back to gitlarp-base, or drop the larp branch. */
+  const resetRepo = async (): Promise<Outcome | null> => {
+    if (busy || !pat) return null;
+    setBusy(true);
+    setError("");
+    let outcome: Outcome;
+    try {
+      const res = await fetch(`${apiBase}/api/commits`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${pat}` },
+      });
+      let body: { kind?: string; sha?: string; branch?: string; error?: string } | null = null;
+      try {
+        body = await res.json();
+      } catch {
+        body = null;
+      }
+      if (!res.ok || !body || body.error) {
+        outcome = { ok: false, text: body?.error ?? `reset failed (HTTP ${res.status})` };
+      } else {
+        outcome = {
+          ok: true,
+          text: body.kind === "reset" ? `reset to gitlarp-base (${body.sha})` : `deleted branch ${body.branch}`,
+        };
+        setPlan({});
+        retry();
       }
     } catch (e) {
       outcome = { ok: false, text: e instanceof Error ? e.message : String(e) };
@@ -223,7 +259,10 @@ export function useGraphState({
     loading,
     retry,
     apply,
+    resetRepo,
     randomFill,
+    jitter,
+    setJitter,
   };
 }
 

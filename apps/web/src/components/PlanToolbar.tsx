@@ -2,7 +2,7 @@
 
 import { Banner } from "@cloudflare/kumo/components/banner";
 import { Button } from "@cloudflare/kumo/components/button";
-import { DatePicker, type DateRange } from "@cloudflare/kumo/components/date-picker";
+import type { DateRange } from "@cloudflare/kumo/components/date-picker";
 import { Input } from "@cloudflare/kumo/components/input";
 import { LayerCard } from "@cloudflare/kumo/components/layer-card";
 import { Popover } from "@cloudflare/kumo/components/popover";
@@ -10,14 +10,23 @@ import { Text } from "@cloudflare/kumo/components/text";
 import { useKumoToastManager } from "@cloudflare/kumo/components/toast";
 import {
   CalendarBlankIcon,
+  ArrowCounterClockwiseIcon,
   ListChecksIcon,
   ShuffleIcon,
   WarningCircleIcon,
 } from "@phosphor-icons/react/dist/ssr";
+import dynamic from "next/dynamic";
 import { useState } from "react";
 
 import { clampLevel, fmt, prettyDay } from "../lib/graph";
+import Toggle from "./Toggle";
 import type { GraphState } from "./useGraphState";
+
+// The calendar loads on first open, keeping it out of first-load JS.
+const RangePicker = dynamic(() => import("./RangePicker"), {
+  ssr: false,
+  loading: () => <div className="h-72 w-64" aria-busy="true" />,
+});
 
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
@@ -30,10 +39,23 @@ export default function PlanToolbar({
   busy,
   error,
   apply,
+  resetRepo,
   randomFill,
+  jitter,
+  setJitter,
 }: { tools: boolean } & Pick<
   GraphState,
-  "pat" | "plan" | "planCount" | "clearPlan" | "busy" | "error" | "apply" | "randomFill"
+  | "pat"
+  | "plan"
+  | "planCount"
+  | "clearPlan"
+  | "busy"
+  | "error"
+  | "apply"
+  | "resetRepo"
+  | "randomFill"
+  | "jitter"
+  | "setJitter"
 >) {
   const toasts = useKumoToastManager();
   const [range, setRange] = useState<DateRange | undefined>();
@@ -50,6 +72,14 @@ export default function PlanToolbar({
   const onApply = async () => {
     const outcome = await apply();
     // failures stay on screen as the error banner; only successes toast
+    if (outcome?.ok) toasts.add({ title: outcome.text, variant: "success" });
+  };
+
+  const onReset = async () => {
+    if (!window.confirm("Undo every larp commit? The default branch resets to its pre-larp state (gitlarp-base).")) {
+      return;
+    }
+    const outcome = await resetRepo();
     if (outcome?.ok) toasts.add({ title: outcome.text, variant: "success" });
   };
 
@@ -93,7 +123,7 @@ export default function PlanToolbar({
                 }
               />
               <Popover.Content side="bottom" align="start">
-                <DatePicker mode="range" timeZone="UTC" max={365} selected={range} onChange={setRange} />
+                <RangePicker selected={range} onChange={setRange} />
               </Popover.Content>
             </Popover>
             <div className="grid grid-cols-2 gap-3">
@@ -137,7 +167,26 @@ export default function PlanToolbar({
         )}
 
         <div className="mt-auto flex flex-col gap-2">
-          <div className="flex justify-end gap-2">
+          {tools && (
+            <Toggle
+              label="Jitter times"
+              title="Stamp each commit at a random time of day instead of noon UTC."
+              checked={jitter}
+              onChange={setJitter}
+            />
+          )}
+          <div className="flex flex-wrap justify-end gap-2">
+            {tools && (
+              <Button
+                variant="secondary-destructive"
+                icon={ArrowCounterClockwiseIcon}
+                disabled={busy || !pat}
+                onClick={onReset}
+                className="mr-auto"
+              >
+                Reset (undo all)
+              </Button>
+            )}
             <Button variant="ghost" disabled={busy || !planCount} onClick={clearPlan}>
               Clear plan
             </Button>

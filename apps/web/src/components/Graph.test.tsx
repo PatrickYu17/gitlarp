@@ -66,12 +66,12 @@ describe("<Graph />", () => {
     const m = renderToStaticMarkup(<Graph tools />);
     expect(m).toContain('id="schedules"');
     expect(m).toContain("Reset (undo all)");
-    expect(m).toContain('id="gitlarp-jitter"');
+    expect(m).toContain("Jitter times");
   });
 
   test("default render has none of the schedules panel, reset, or jitter", () => {
     expect(markup).not.toContain('id="schedules"');
     expect(markup).not.toContain("Reset (undo all)");
-    expect(markup).not.toContain('id="gitlarp-jitter"');
+    expect(markup).not.toContain("Jitter times");
   });
 });

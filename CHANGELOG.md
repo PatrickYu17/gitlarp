@@ -22,10 +22,13 @@ follows Cargo's version numbers.
   header is client-spoofable without a sanitizing proxy, and the
   rightmost entry is the only one our own proxy controls.
 - Web UI: a Schedules panel — create/list/delete schedules with
-  `lastRun`, a clear 503 "scheduling disabled" state, and upcoming
-  scheduled days previewed as dashed ghost cells on the graph (the web
-  app could previously only read the graph and apply plans); a Reset
-  button (`DELETE /api/commits`) and a "jitter times" checkbox.
+  `lastRun`, a clear 503 "scheduling disabled" state, and a preview of
+  the next scheduled day (the web app could previously only read the
+  graph and apply plans); a Reset button (`DELETE /api/commits`) and a
+  "jitter times" checkbox.
+- Web UI moved to Cloudflare Kumo + Tailwind v4, with light/dark from
+  the OS (or `?theme=` on the widget). The range calendar loads on first
+  open to keep first-load JS inside the 100 KB budget.
 - Server: integration tests for CORS preflights (204 + headers, exempt
   from the limiter), missing-PAT 400s on the schedules routes, the run
   endpoint's no-header 401, per-IP limiter isolation, and malformed-JSON

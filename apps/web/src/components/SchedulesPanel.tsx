@@ -1,6 +1,16 @@
 "use client";
 
+import { Banner } from "@cloudflare/kumo/components/banner";
+import { Button } from "@cloudflare/kumo/components/button";
+import { Input } from "@cloudflare/kumo/components/input";
+import { LayerCard } from "@cloudflare/kumo/components/layer-card";
+import { Text } from "@cloudflare/kumo/components/text";
+import { useKumoToastManager } from "@cloudflare/kumo/components/toast";
+import { CalendarCheckIcon, TrashIcon, WarningCircleIcon } from "@phosphor-icons/react/dist/ssr";
 import { useEffect, useState } from "react";
+
+import { fmt, prettyDay } from "../lib/graph";
+import Toggle from "./Toggle";
 
 export type ScheduleSpec = {
   min?: number;
@@ -23,11 +33,7 @@ const DISABLED_MSG =
   "Scheduling is disabled on this API server — no schedule secret is configured.";
 const RATE_LIMITED_MSG = "rate limited — wait a minute and try again";
 
-// UTC everywhere, mirroring Graph.tsx: the API validates dates against UTC.
-const pad2 = (n: number) => String(n).padStart(2, "0");
-
-const fmt = (d: Date) =>
-  `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())}`;
+// UTC everywhere, mirroring lib/graph.ts: the API validates dates against UTC.
 
 /** Today's date at noon UTC, so date-only strings stay stable all day. */
 const todayStr = () => {
@@ -45,8 +51,9 @@ const addDays = (dateStr: string, n: number) => {
 /**
  * Days each spec will commit on, as a union: from `max(spec.from, today+1)`
  * through `min(spec.to ?? today+horizon, today+horizon)`, skipping UTC
- * weekends unless the spec asks for them. Pure — the graph overlays these
- * as ghost cells before the server ever runs.
+ * weekends unless the spec asks for them. Pure — the panel previews these
+ * before the server ever runs. (They are all after today, so the graph,
+ * which ends today, has no cells for them.)
  */
 export function upcomingDays(
   specs: ScheduleSpec[],
@@ -71,20 +78,13 @@ export function upcomingDays(
   return days;
 }
 
-const noop = () => {};
+const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
-export default function SchedulesPanel({
-  pat,
-  apiBase,
-  onGhostDays = noop,
-}: {
-  pat: string;
-  apiBase: string;
-  onGhostDays?: (dates: Set<string>) => void;
-}) {
+export default function SchedulesPanel({ pat, apiBase }: { pat: string; apiBase: string }) {
+  const toasts = useKumoToastManager();
   const [schedules, setSchedules] = useState<Schedule[]>([]);
+  const [upcoming, setUpcoming] = useState<string[]>([]);
   const [err, setErr] = useState("");
-  const [msg, setMsg] = useState("");
   const [disabled, setDisabled] = useState(false);
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -102,7 +102,7 @@ export default function SchedulesPanel({
       setSchedules([]);
       setErr("");
       setDisabled(false);
-      onGhostDays(new Set());
+      setUpcoming([]);
       setLoading(false);
       return;
     }
@@ -134,11 +134,13 @@ export default function SchedulesPanel({
           setSchedules(list);
           setDisabled(false);
           setErr("");
-          onGhostDays(
-            upcomingDays(
-              list.filter((s) => !s.broken && s.spec).map((s) => s.spec as ScheduleSpec),
-              todayStr()
-            )
+          setUpcoming(
+            [
+              ...upcomingDays(
+                list.filter((s) => !s.broken && s.spec).map((s) => s.spec as ScheduleSpec),
+                todayStr()
+              ),
+            ].sort()
           );
         }
       } catch (e) {
@@ -151,13 +153,13 @@ export default function SchedulesPanel({
       alive = false;
       clearTimeout(t);
     };
-  }, [pat, apiBase, attempt, onGhostDays]);
+  }, [pat, apiBase, attempt]);
 
   // A failed fetch says nothing about current schedules — drop them rather
   // than show stale data.
   const fail = (message: string) => {
     setSchedules([]);
-    onGhostDays(new Set());
+    setUpcoming([]);
     setErr(message);
   };
 
@@ -168,7 +170,6 @@ export default function SchedulesPanel({
       return;
     }
     setBusy(true);
-    setMsg("");
     try {
       const res = await fetch(`${apiBase}/api/schedules`, {
         method: "POST",
@@ -199,7 +200,7 @@ export default function SchedulesPanel({
         setErr(body?.error ?? `failed (HTTP ${res.status})`);
       } else {
         setErr("");
-        setMsg("schedule created");
+        toasts.add({ title: "schedule created", variant: "success" });
         setAttempt((a) => a + 1);
       }
     } catch (e) {
@@ -210,7 +211,6 @@ export default function SchedulesPanel({
 
   const remove = async (id: string) => {
     setBusy(true);
-    setMsg("");
     try {
       const res = await fetch(`${apiBase}/api/schedules?id=${encodeURIComponent(id)}`, {
         method: "DELETE",
@@ -227,7 +227,7 @@ export default function SchedulesPanel({
       else if (!res.ok || !body || body.error) setErr(body?.error ?? `failed (HTTP ${res.status})`);
       else {
         setErr("");
-        setMsg("schedule deleted");
+        toasts.add({ title: "schedule deleted", variant: "success" });
         setAttempt((a) => a + 1);
       }
     } catch (e) {
@@ -237,89 +237,130 @@ export default function SchedulesPanel({
   };
 
   return (
-    <section id="schedules" className="schedules">
-      <h2>Schedules (auto-pilot)</h2>
-      {!pat ? (
-        <p className="hint">enter a PAT above to manage schedules</p>
-      ) : (
-        <>
-          {loading && <p role="status">loading schedules…</p>}
-          {err && <p role="alert">{err}</p>}
-          {msg && <p>{msg}</p>}
-          <ul>
-            {schedules.map((s) =>
-              s.broken || !s.spec ? (
-                <li key={s.id}>
-                  <span>{s.id} broken (undecryptable — was the secret rotated?)</span>
-                </li>
-              ) : (
-                <li key={s.id}>
-                  <span>
-                    {s.spec.min}–{s.spec.max}/day •{" "}
-                    {s.spec.weekends ? "weekends on" : "weekends off"} • {s.spec.from ?? "today"} →{" "}
-                    {s.spec.to ?? "ongoing"} • catch-up {s.spec.catchup}
-                  </span>
-                  <span className="meta">last run: {s.lastRun ?? "never"}</span>
-                  <button disabled={busy} onClick={() => remove(s.id)}>
-                    Delete
-                  </button>
-                </li>
-              )
-            )}
-          </ul>
-          {!disabled && (
-            <form
-              className="form-row"
-              onSubmit={(e) => {
-                e.preventDefault();
-                create();
-              }}
-            >
-              <label htmlFor="sched-min">min</label>
-              <input
-                id="sched-min"
-                type="number"
-                min={1}
-                max={100}
-                value={min}
-                onChange={(e) => setMin(+e.target.value)}
-              />
-              <label htmlFor="sched-max">max</label>
-              <input
-                id="sched-max"
-                type="number"
-                min={1}
-                max={100}
-                value={max}
-                onChange={(e) => setMax(+e.target.value)}
-              />
-              <label htmlFor="sched-from">from</label>
-              <input id="sched-from" type="date" value={from} onChange={(e) => setFrom(e.target.value)} />
-              <label htmlFor="sched-to">to</label>
-              <input id="sched-to" type="date" value={to} onChange={(e) => setTo(e.target.value)} />
-              <label htmlFor="sched-catchup">catch-up</label>
-              <input
-                id="sched-catchup"
-                type="number"
-                min={1}
-                max={365}
-                value={catchup}
-                onChange={(e) => setCatchup(+e.target.value)}
-              />
-              <label htmlFor="sched-weekends">
-                <input
-                  id="sched-weekends"
-                  type="checkbox"
-                  checked={weekends}
-                  onChange={(e) => setWeekends(e.target.checked)}
+    <section id="schedules">
+      <LayerCard>
+        <LayerCard.Secondary className="flex items-center gap-2 font-medium">
+          <CalendarCheckIcon size={16} className="text-kumo-subtle" />
+          <h2 className="m-0 text-base font-medium">Schedules (auto-pilot)</h2>
+        </LayerCard.Secondary>
+        <LayerCard.Primary className="flex flex-col gap-4">
+          {!pat ? (
+            <Text variant="secondary" size="sm">
+              enter a PAT above to manage schedules
+            </Text>
+          ) : (
+            <>
+              {loading && (
+                <span role="status" className="sr-only">
+                  loading schedules…
+                </span>
+              )}
+              {err && (
+                <Banner
+                  variant="error"
+                  size="sm"
+                  icon={<WarningCircleIcon weight="fill" />}
+                  description={<span role="alert">{err}</span>}
                 />
-                weekends
-              </label>
-              <button disabled={busy}>Create schedule</button>
-            </form>
+              )}
+
+              {schedules.length > 0 ? (
+                <ul className="m-0 flex list-none flex-col divide-y divide-kumo-line p-0">
+                  {schedules.map((s) => (
+                    <li key={s.id} className="flex flex-wrap items-center justify-between gap-2 py-2">
+                      {s.broken || !s.spec ? (
+                        <Text size="sm">{s.id} broken (undecryptable — was the secret rotated?)</Text>
+                      ) : (
+                        <div className="flex flex-col">
+                          <Text size="sm">
+                            {s.spec.min}–{s.spec.max}/day • {s.spec.weekends ? "weekends on" : "weekends off"} •{" "}
+                            {s.spec.from ?? "today"} → {s.spec.to ?? "ongoing"} • catch-up {s.spec.catchup}
+                          </Text>
+                          <Text variant="secondary" size="xs">
+                            last run: {s.lastRun ?? "never"}
+                          </Text>
+                        </div>
+                      )}
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        icon={TrashIcon}
+                        disabled={busy}
+                        aria-label={`Delete schedule ${s.id}`}
+                        onClick={() => remove(s.id)}
+                      >
+                        Delete
+                      </Button>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                !loading &&
+                !err && (
+                  <Text variant="secondary" size="sm">
+                    No schedules yet.
+                  </Text>
+                )
+              )}
+
+              {upcoming.length > 0 && (
+                <Text variant="secondary" size="sm">
+                  Next scheduled day: {prettyDay(upcoming[0], true)} ({plural(upcoming.length, "day")} in the next
+                  two months)
+                </Text>
+              )}
+
+              {!disabled && (
+                <form
+                  className="flex flex-col gap-3 rounded-lg bg-kumo-recessed p-3"
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    create();
+                  }}
+                >
+                  <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+                    <Input
+                      label="Min per day"
+                      type="number"
+                      size="sm"
+                      min={1}
+                      max={100}
+                      value={min}
+                      onChange={(e) => setMin(+e.target.value)}
+                    />
+                    <Input
+                      label="Max per day"
+                      type="number"
+                      size="sm"
+                      min={1}
+                      max={100}
+                      value={max}
+                      onChange={(e) => setMax(+e.target.value)}
+                    />
+                    <Input
+                      label="Catch-up days"
+                      type="number"
+                      size="sm"
+                      min={1}
+                      max={365}
+                      value={catchup}
+                      onChange={(e) => setCatchup(+e.target.value)}
+                    />
+                    <Input label="From" type="date" size="sm" value={from} onChange={(e) => setFrom(e.target.value)} />
+                    <Input label="To" type="date" size="sm" value={to} onChange={(e) => setTo(e.target.value)} />
+                  </div>
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <Toggle label="Weekends" checked={weekends} onChange={setWeekends} />
+                    <Button type="submit" variant="secondary" loading={busy} disabled={busy}>
+                      Create schedule
+                    </Button>
+                  </div>
+                </form>
+              )}
+            </>
           )}
-        </>
-      )}
+        </LayerCard.Primary>
+      </LayerCard>
     </section>
   );
 }

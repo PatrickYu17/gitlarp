@@ -10,6 +10,7 @@ import { WarningCircleIcon } from "@phosphor-icons/react/dist/ssr";
 import ConnectionPanel from "./ConnectionPanel";
 import ContributionGrid from "./ContributionGrid";
 import PlanToolbar from "./PlanToolbar";
+import SchedulesPanel from "./SchedulesPanel";
 import { type GraphState, useGraphState } from "./useGraphState";
 
 type GraphProps = {
@@ -130,9 +131,14 @@ function GraphBody({ tools = false, apiParam, apiBase }: GraphProps) {
           busy={s.busy}
           error={s.error}
           apply={s.apply}
+          resetRepo={s.resetRepo}
           randomFill={s.randomFill}
+          jitter={s.jitter}
+          setJitter={s.setJitter}
         />
       </div>
+
+      {tools && <SchedulesPanel pat={s.pat} apiBase={s.apiBase} />}
     </div>
   );
 }

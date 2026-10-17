@@ -1,23 +1,41 @@
+import { Toasty } from "@cloudflare/kumo/components/toast";
 import { describe, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import SchedulesPanel, { upcomingDays } from "./SchedulesPanel";
 
+// The panel toasts on create/delete, so it needs Graph's toast provider.
+const render = (pat: string) =>
+  renderToStaticMarkup(
+    <Toasty>
+      <SchedulesPanel pat={pat} apiBase="http://x" />
+    </Toasty>
+  );
+
+/** Kumo's Field generates ids, so check label → input wiring instead. */
+function labelledInput(markup: string, label: string): string | null {
+  const m = markup.match(new RegExp(`<label[^>]*for="([^"]+)"[^>]*>(?:<[^>]+>)*${label}<`));
+  if (!m) return null;
+  const input = markup.match(new RegExp(`<input[^>]*id="${m[1]}"[^>]*>`));
+  return input ? input[0] : null;
+}
+
 describe("<SchedulesPanel />", () => {
   test("renders the schedules section, heading, and form", () => {
-    const markup = renderToStaticMarkup(<SchedulesPanel pat="p" apiBase="http://x" />);
+    const markup = render("p");
     expect(markup).toContain('id="schedules"');
     expect(markup).toContain("Schedules (auto-pilot)");
-    expect(markup).toContain('id="sched-min"');
-    expect(markup).toContain('id="sched-max"');
-    expect(markup).toContain('id="sched-weekends"');
-    expect(markup).toContain('id="sched-from"');
-    expect(markup).toContain('id="sched-to"');
-    expect(markup).toContain('id="sched-catchup"');
+    expect(labelledInput(markup, "Min per day")).toContain('type="number"');
+    expect(labelledInput(markup, "Max per day")).toContain('type="number"');
+    expect(labelledInput(markup, "Catch-up days")).toContain('type="number"');
+    expect(labelledInput(markup, "From")).toContain('type="date"');
+    expect(labelledInput(markup, "To")).toContain('type="date"');
+    expect(markup).toContain("Weekends");
+    expect(markup).toContain("Create schedule");
   });
 
   test("without a PAT shows the hint, not the disabled message", () => {
-    const markup = renderToStaticMarkup(<SchedulesPanel pat="" apiBase="http://x" />);
+    const markup = render("");
     expect(markup).toContain("enter a PAT above to manage schedules");
     expect(markup).not.toContain("Scheduling is disabled");
   });
