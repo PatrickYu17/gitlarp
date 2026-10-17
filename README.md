@@ -78,6 +78,14 @@ sessionStorage) → `NEXT_PUBLIC_GITLARP_API_URL` (build time) →
 graph fetches and in the JSON body for commits; the UI shows the exact API
 base it will be sent to next to the PAT input.
 
+The main page (not the widget) also has a Schedules panel: create, list,
+and delete auto-pilot schedules against the headless API, with upcoming
+scheduled days previewed as dashed ghost cells on the graph. When the API
+server has no `GITLARP_SCHEDULE_SECRET`, scheduling is disabled and the
+panel says so. A Reset button undoes every larp commit
+(`DELETE /api/commits`), and a "jitter times" checkbox stamps applied
+commits at random times within the day.
+
 One core, four shells. `apps/core` (Rust) holds every piece of domain
 logic: plan validation, schedules, the GitHub commit engine, crypto,
 the schedule runner. The other apps are thin adapters over it:

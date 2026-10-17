@@ -53,4 +53,17 @@ describe("<Graph />", () => {
     expect(m).toContain("PAT will be sent to: http://localhost:9999");
     expect(m).not.toContain("not HTTPS");
   });
+
+  test("tools render adds the schedules panel, reset, and jitter", () => {
+    const m = renderToStaticMarkup(<Graph tools />);
+    expect(m).toContain('id="schedules"');
+    expect(m).toContain("Reset (undo all)");
+    expect(m).toContain('id="gitlarp-jitter"');
+  });
+
+  test("default render has none of the schedules panel, reset, or jitter", () => {
+    expect(markup).not.toContain('id="schedules"');
+    expect(markup).not.toContain("Reset (undo all)");
+    expect(markup).not.toContain('id="gitlarp-jitter"');
+  });
 });
