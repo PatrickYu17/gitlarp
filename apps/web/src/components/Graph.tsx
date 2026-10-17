@@ -203,6 +203,34 @@ export default function Graph({
     setBusy(false);
   };
 
+  const resetRepo = async () => {
+    if (!window.confirm("Undo every larp commit? The default branch resets to its pre-larp state (gitlarp-base).")) return;
+    setBusy(true);
+    setMsg("");
+    try {
+      const res = await fetch(`${apiBase}/api/commits`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${pat}` },
+      });
+      let body: { kind?: string; sha?: string; branch?: string; error?: string } | null = null;
+      try {
+        body = await res.json();
+      } catch {
+        body = null;
+      }
+      if (!res.ok || !body || body.error) {
+        setMsg(body?.error ?? `reset failed (HTTP ${res.status})`);
+      } else {
+        setMsg(body.kind === "reset" ? `reset to gitlarp-base (${body.sha})` : `deleted branch ${body.branch}`);
+        setPlan({});
+        setAttempt((a) => a + 1); // refetch the graph
+      }
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : String(e));
+    }
+    setBusy(false);
+  };
+
   const randomFill = () => {
     if (!from || !to) return;
     // parse at UTC noon: date-only strings are UTC days on the wire
@@ -364,6 +392,11 @@ export default function Graph({
         <button disabled={busy || !planCount} onClick={() => setPlan({})}>
           Clear plan
         </button>
+        {tools && (
+          <button disabled={busy || !pat} onClick={resetRepo}>
+            Reset (undo all)
+          </button>
+        )}
       </div>
 
       <p className="hint">

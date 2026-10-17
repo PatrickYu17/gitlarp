@@ -54,12 +54,14 @@ describe("<Graph />", () => {
     expect(m).not.toContain("not HTTPS");
   });
 
-  test("tools render adds the jitter toggle", () => {
+  test("tools render adds reset and jitter", () => {
     const m = renderToStaticMarkup(<Graph tools />);
+    expect(m).toContain("Reset (undo all)");
     expect(m).toContain('id="gitlarp-jitter"');
   });
 
-  test("default render has no jitter toggle", () => {
+  test("default render has neither reset nor jitter", () => {
+    expect(markup).not.toContain("Reset (undo all)");
     expect(markup).not.toContain('id="gitlarp-jitter"');
   });
 });
