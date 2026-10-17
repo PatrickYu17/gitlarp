@@ -3,6 +3,8 @@
 //! Endpoints:
 //!
 //! - `POST /api/commits`: write backdated commits (pat in body)
+//! - `DELETE /api/commits`: undo every larp commit — reset the default
+//!   branch to gitlarp-base, or delete it (pat in the header)
 //! - `GET /api/graph`: contribution calendar for a PAT
 //! - `GET /api/schedules`: list a user's schedules (decrypted)
 //! - `POST /api/schedules`: create a schedule (pat in body)
@@ -333,6 +335,28 @@ async fn commits_post(
     }
 }
 
+/// `DELETE /api/commits`: undo every larp commit — reset the default
+/// branch to gitlarp-base, or delete it when the repo was empty when
+/// larping started. PAT in the Authorization: Bearer header.
+async fn commits_delete(state: web::Data<AppState>, req: HttpRequest) -> HttpResponse {
+    if let Some(resp) = rate_guard(&state, &req) {
+        return resp;
+    }
+    let pat = pat_from(&req);
+    if pat.is_empty() {
+        return bad_request("missing pat");
+    }
+    // serialize against POST /api/commits and the runner: a wipe
+    // racing a commit run resets the ref underneath it
+    let _write = state.write_lock.lock().await;
+    match engine::wipe(state.rt.as_ref(), &pat, gh::DEFAULT_REPO, None).await {
+        Ok(outcome) => {
+            HttpResponse::Ok().json(serde_json::to_value(&outcome).unwrap_or_else(|_| json!({})))
+        }
+        Err(e) => core_error(e),
+    }
+}
+
 async fn graph_get(state: web::Data<AppState>, req: HttpRequest) -> HttpResponse {
     // rate-limited like the mutations: each call makes two upstream
     // GitHub requests, so anonymous hammering would burn the server's
@@ -570,6 +594,7 @@ fn build_app(
         .service(
             web::resource("/api/commits")
                 .route(web::post().to(commits_post))
+                .route(web::delete().to(commits_delete))
                 .route(web::method(Method::OPTIONS).to(cors_preflight)),
         )
         .service(
@@ -767,7 +792,8 @@ mod tests {
     /// Canned GitHub: `p1` is user id 1 "tester", `p2` is id 2
     /// "tester2"; the calendar count echoes which login the GraphQL
     /// query targeted (1 for tester, 2 for tester2). The engine flow
-    /// runs against a fresh repo (branch ref 404 -> seed path).
+    /// runs against a fresh repo (branch ref 404 -> seed path, so the
+    /// gitlarp-base ref is only ever read by `wipe`).
     fn mock_fetch(req: CoreRequest) -> Result<CoreResponse, Error> {
         let path = req
             .url
@@ -820,6 +846,9 @@ mod tests {
             ("POST", "/repos/tester/gitlarp-history/git/refs") => Ok(mock_ok(json!({}))),
             ("PATCH", "/repos/tester/gitlarp-history/git/refs/heads/main") => {
                 Ok(mock_ok(json!({})))
+            }
+            ("GET", "/repos/tester/gitlarp-history/git/ref/heads/gitlarp-base") => {
+                Ok(mock_ok(json!({ "object": { "sha": "base-sha" } })))
             }
             _ => Err(Error::new(500, format!("mock: unexpected {} {}", req.method, path))),
         }
@@ -942,6 +971,55 @@ mod tests {
         let (status, v) = call_json(&app, req).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(v["error"].as_str().unwrap().contains("cap"));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    // -- (b2) wipe: DELETE /api/commits ------------------------------------
+
+    #[actix_web::test]
+    async fn wipe_missing_pat_is_400() {
+        let dir = temp_root();
+        let state = test_state(dir.clone(), Some("S"), None, true);
+        let app = test::init_service(build_app(state)).await;
+        let req = TestRequest::delete().uri("/api/commits").to_request();
+        let (status, v) = call_json(&app, req).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(v["error"], "missing pat");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// The mock answers the gitlarp-base ref GET with "base-sha", so a
+    /// wipe for `p1` resets the default branch to it (`WipeOutcome`
+    /// serializes with `tag = "kind"`).
+    #[actix_web::test]
+    async fn wipe_resets_the_default_branch_to_base() {
+        let dir = temp_root();
+        let state = test_state(dir.clone(), Some("S"), None, true);
+        let app = test::init_service(build_app(state)).await;
+        let req = TestRequest::delete()
+            .uri("/api/commits")
+            .insert_header(bearer("p1"))
+            .to_request();
+        let (status, v) = call_json(&app, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(v, json!({ "kind": "reset", "sha": "base-sha" }));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// Core 4xx errors pass through verbatim: a bad PAT is GitHub's
+    /// 401, re-served as-is (not mapped to 502).
+    #[actix_web::test]
+    async fn wipe_bad_pat_is_401() {
+        let dir = temp_root();
+        let state = test_state(dir.clone(), Some("S"), None, true);
+        let app = test::init_service(build_app(state)).await;
+        let req = TestRequest::delete()
+            .uri("/api/commits")
+            .insert_header(bearer("pbad"))
+            .to_request();
+        let (status, v) = call_json(&app, req).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(v["error"], "invalid PAT");
         std::fs::remove_dir_all(dir).ok();
     }
 
