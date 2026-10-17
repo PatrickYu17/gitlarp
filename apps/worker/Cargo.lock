@@ -268,7 +268,7 @@ dependencies = [
 
 [[package]]
 name = "gitlarp-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "aes-gcm",
  "base64",
@@ -281,7 +281,7 @@ dependencies = [
 
 [[package]]
 name = "gitlarp-worker"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "getrandom",
  "gitlarp-core",

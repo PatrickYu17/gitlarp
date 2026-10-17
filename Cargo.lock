@@ -789,7 +789,7 @@ dependencies = [
 
 [[package]]
 name = "gitlarp"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "fastrand",
  "gitlarp-core",
@@ -798,7 +798,7 @@ dependencies = [
 
 [[package]]
 name = "gitlarp-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "aes-gcm",
  "base64",
@@ -812,7 +812,7 @@ dependencies = [
 
 [[package]]
 name = "gitlarp-server"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "actix-web",
  "env_logger",

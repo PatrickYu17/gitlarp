@@ -8,6 +8,17 @@ LARP your GitHub contribution graph. Two thin tools, a Rust CLI and a headless w
 cargo install --path apps/cli
 ```
 
+Or grab a prebuilt binary from the latest release (assets: `gitlarp-x86_64-linux`,
+`gitlarp-aarch64-linux`, `gitlarp-aarch64-macos`):
+
+```sh
+base=https://github.com/PatrickYu17/gitlarp/releases/latest/download
+curl -fsSLO "$base/gitlarp-aarch64-macos"          # pick your platform
+curl -fsSLO "$base/gitlarp-aarch64-macos.sha256"
+shasum -a 256 -c gitlarp-aarch64-macos.sha256       # Linux: sha256sum -c
+chmod +x gitlarp-aarch64-macos && mv gitlarp-aarch64-macos /usr/local/bin/gitlarp
+```
+
 Requires the `gh` CLI on PATH, logged in (`gh auth login`). Every CLI command
 takes its token from `gh auth token` and sends all GitHub traffic through
 `gh api`: that's the whole auth story; nothing in the code verifies email.
