@@ -5,25 +5,33 @@ import { DEFAULT_API_BASE } from "../lib/api-base";
 
 import Graph from "./Graph";
 
+/**
+ * The input a visible label points at. Kumo's Field generates the ids, so
+ * assert the label → control wiring rather than fixed id strings.
+ */
+function labelledInput(markup: string, label: string): string | null {
+  const m = markup.match(new RegExp(`<label[^>]*for="([^"]+)"[^>]*>(?:<[^>]+>)*${label}<`));
+  if (!m) return null;
+  const input = markup.match(new RegExp(`<input[^>]*id="${m[1]}"[^>]*>`));
+  return input ? input[0] : null;
+}
+
 describe("<Graph />", () => {
   const markup = renderToStaticMarkup(<Graph />);
 
-  test("renders the PAT input", () => {
-    expect(markup).toContain('id="gitlarp-pat"');
-    expect(markup).toContain('for="gitlarp-pat"');
-    expect(markup).toContain("GitHub PAT");
+  test("renders the PAT input, labelled and masked", () => {
+    const input = labelledInput(markup, "GitHub PAT");
+    expect(input).not.toBeNull();
+    expect(input).toContain('type="password"');
   });
 
-  test("renders the API URL input", () => {
-    expect(markup).toContain('id="gitlarp-api-url"');
-    expect(markup).toContain('for="gitlarp-api-url"');
-    expect(markup).toContain("API URL");
+  test("renders the API URL input, labelled", () => {
+    const input = labelledInput(markup, "API URL");
+    expect(input).not.toBeNull();
+    expect(input).toContain('type="text"');
   });
 
   test("renders 365 graph cells with aria-labels", () => {
-    const labels = markup.match(/aria-label="/g) ?? [];
-    expect(labels.length).toBe(365);
-    // each cell label mentions commits planned
     expect(markup.match(/aria-label="[^"]*commits planned"/g)?.length).toBe(365);
   });
 
@@ -58,12 +66,12 @@ describe("<Graph />", () => {
     const m = renderToStaticMarkup(<Graph tools />);
     expect(m).toContain('id="schedules"');
     expect(m).toContain("Reset (undo all)");
-    expect(m).toContain('id="gitlarp-jitter"');
+    expect(m).toContain("Jitter times");
   });
 
   test("default render has none of the schedules panel, reset, or jitter", () => {
     expect(markup).not.toContain('id="schedules"');
     expect(markup).not.toContain("Reset (undo all)");
-    expect(markup).not.toContain('id="gitlarp-jitter"');
+    expect(markup).not.toContain("Jitter times");
   });
 });

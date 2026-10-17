@@ -79,8 +79,8 @@ graph fetches and in the JSON body for commits; the UI shows the exact API
 base it will be sent to next to the PAT input.
 
 The main page (not the widget) also has a Schedules panel: create, list,
-and delete auto-pilot schedules against the headless API, with upcoming
-scheduled days previewed as dashed ghost cells on the graph. When the API
+and delete auto-pilot schedules against the headless API, with a preview
+of the next scheduled day and how many fall in the next two months. When the API
 server has no `GITLARP_SCHEDULE_SECRET`, scheduling is disabled and the
 panel says so. A Reset button undoes every larp commit
 (`DELETE /api/commits`), and a "jitter times" checkbox stamps applied
