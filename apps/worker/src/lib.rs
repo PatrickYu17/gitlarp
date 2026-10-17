@@ -662,7 +662,21 @@ async fn commits(mut req: Request, _ctx: RouteContext<()>) -> worker::Result<Res
         Ok(p) => p,
         Err(e) => return core_err(e),
     };
-    match engine::write_commits(&WorkerRuntime, &pat, gh::DEFAULT_REPO, &p.days, None).await {
+    let jitter = match body.get("jitter") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(b)) => *b,
+        Some(_) => return err_json("jitter must be a boolean", 400),
+    };
+    match engine::write_commits_opts(
+        &WorkerRuntime,
+        &pat,
+        gh::DEFAULT_REPO,
+        &p.days,
+        None,
+        engine::CommitOptions { jitter },
+    )
+    .await
+    {
         Ok(r) => {
             let mut out = json!({ "created": r.created, "total": r.total });
             if let Some(err) = &r.partial {
