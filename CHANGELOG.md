@@ -13,6 +13,9 @@ follows Cargo's version numbers.
   commit at a uniform random time within its day instead of a fixed
   12:00 UTC (the fixed noon was an obvious tell). Default unchanged.
   Scheduled (runner) commits are unchanged.
+- `DELETE /api/commits` on both headless surfaces (server + worker): the
+  CLI's `wipe` over the API — reset to `gitlarp-base` or delete the
+  branch.
 - Server: integration tests for CORS preflights (204 + headers, exempt
   from the limiter), missing-PAT 400s on the schedules routes, the run
   endpoint's no-header 401, per-IP limiter isolation, and malformed-JSON

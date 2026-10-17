@@ -159,9 +159,16 @@ curl -X POST https://your-server.app/api/commits \
 - partial failure: `{"created":2,"total":3,"partial":true,"error":"..."}`
 - clamped dates add `"clamped":1`
 
+`DELETE /api/commits` (Authorization: Bearer PAT) undoes every larp
+commit: the default branch resets to `gitlarp-base`
+(`{"kind":"reset","sha":"..."}`), or is deleted when the repo was empty
+when larping started (`{"kind":"deleted","branch":"..."}`). Nothing to
+wipe → `400 {"error":"nothing to wipe (no gitlarp-base, no remote branch)"}`.
+Works on both the server and the worker.
+
 `GET /api/graph` returns `{"counts":{"YYYY-MM-DD":n}}` for the last 12 months.
 
-Auth: `Authorization: Bearer <PAT>` on `GET /api/graph` and
+Auth: `Authorization: Bearer <PAT>` on `GET /api/graph`, `DELETE /api/commits`, and
 `GET|DELETE /api/schedules` — the PAT lives in the header only, never in
 URLs (a `?pat=` query parameter existed once and was removed; it put live
 tokens in proxies' logs and browser history). `POST /api/commits` and
@@ -195,9 +202,10 @@ curl -X POST https://your-server.app/api/schedules/run \
 - failure policy: a run that fails leaves `lastRun` untouched and retries the window on the next tick; partial successes are marked done
 
 Rate limiting: fixed window of 30 req/min per IP on every endpoint that
-talks to upstream GitHub (`POST /api/commits`, `POST /api/schedules`,
-`POST /api/schedules/run`, `DELETE /api/schedules`, `GET /api/schedules`,
-and `GET /api/graph`, which costs two upstream calls per request) —
+talks to upstream GitHub (`POST /api/commits`, `DELETE /api/commits`,
+`POST /api/schedules`, `POST /api/schedules/run`, `DELETE /api/schedules`,
+`GET /api/schedules`, and `GET /api/graph`, which costs two upstream
+calls per request) —
 enforced on both `apps/server` and `apps/worker`; over-limit → `429` +
 `Retry-After: 60`. `GET /healthz` stays exempt. The limiter keys on the
 direct TCP peer address (it deliberately does not trust `X-Forwarded-For`),
