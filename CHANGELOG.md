@@ -6,6 +6,10 @@ follows Cargo's version numbers.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.3.0] - 2026-10-17
+
 Hardening pass from the pre-publication security audit.
 
 ### Security
