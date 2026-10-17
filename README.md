@@ -78,6 +78,14 @@ sessionStorage) → `NEXT_PUBLIC_GITLARP_API_URL` (build time) →
 graph fetches and in the JSON body for commits; the UI shows the exact API
 base it will be sent to next to the PAT input.
 
+The main page (not the widget) also has a Schedules panel: create, list,
+and delete auto-pilot schedules against the headless API, with upcoming
+scheduled days previewed as dashed ghost cells on the graph. When the API
+server has no `GITLARP_SCHEDULE_SECRET`, scheduling is disabled and the
+panel says so. A Reset button undoes every larp commit
+(`DELETE /api/commits`), and a "jitter times" checkbox stamps applied
+commits at random times within the day.
+
 One core, four shells. `apps/core` (Rust) holds every piece of domain
 logic: plan validation, schedules, the GitHub commit engine, crypto,
 the schedule runner. The other apps are thin adapters over it:
@@ -210,7 +218,10 @@ enforced on both `apps/server` and `apps/worker`; over-limit → `429` +
 `Retry-After: 60`. `GET /healthz` stays exempt. The limiter keys on the
 direct TCP peer address (it deliberately does not trust `X-Forwarded-For`),
 so behind a reverse proxy every client shares one bucket — expose the
-server directly or account for that.
+server directly, account for that, or set `TRUST_PROXY=1`: the limiter
+then keys on the rightmost `X-Forwarded-For` entry (accurate behind
+exactly one proxy that appends the client address; spoofable left
+entries can shift buckets but never grant extra quota). Off by default.
 
 Errors: core 4xx (validation: bad dates, missing pat, caps, invalid
 PAT, unknown schedule) pass through verbatim; anything else maps to
@@ -227,6 +238,7 @@ decrypts). CORS `*`.
 | `SCHEDULE_DIR` | server | schedule store dir (default `./data/schedules`) |
 | `GITLARP_SCHEDULE_SECRET` | server, worker | schedule encryption + run-endpoint bearer; unset ⇒ run 503s, scheduling disabled. Must be ≥16 **bytes** and random (`openssl rand -base64 32`), not a passphrase: the AES key is a plain SHA-256 of it, and the server refuses to boot / the worker fail-closes with shorter secrets |
 | `GITLARP_SCHEDULE_SECRET_OLD` | server | lazy-rotation fallback decrypt (runner heals on run and on read; worker: none — GET heals) |
+| `TRUST_PROXY` | server | `1` = rate limiter keys on the rightmost X-Forwarded-For entry instead of the TCP peer (single-reverse-proxy deployments); unset/anything else = off |
 | `SCHEDULE_LOOP` | server | `1` = hourly in-process scheduler |
 | `GH_TOKEN` / gh auth | CLI | transport auth (never argv) |
 | `GITLARP_HOME`, `GITLARP_REPO` | CLI | config dir / repo name |

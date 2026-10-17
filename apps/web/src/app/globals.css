@@ -137,3 +137,59 @@ button:disabled {
 p {
   margin: 0;
 }
+
+.cell.ghost {
+  outline: 2px dashed var(--accent);
+  outline-offset: -1px;
+  opacity: 0.55;
+}
+
+.schedules {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: flex-start;
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+  width: 100%;
+}
+
+.schedules h2 {
+  font-size: 14px;
+  margin: 0;
+}
+
+.schedules ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.schedules li {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+
+.schedules .meta {
+  opacity: 0.7;
+}
+
+.schedules .form-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.schedules input[type="number"] {
+  width: 4.5em;
+}
+
+.schedules input[type="checkbox"] {
+  width: auto;
+}
