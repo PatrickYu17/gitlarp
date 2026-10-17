@@ -22,15 +22,16 @@ const DEFAULT_REPO: &str = "gitlarp-history";
 struct Ctx {
     home: PathBuf,
     force: bool,
+    jitter: bool,
 }
 
 impl Ctx {
-    fn from_env(force: bool) -> Ctx {
+    fn from_env(force: bool, jitter: bool) -> Ctx {
         let home = match env::var("GITLARP_HOME") {
             Ok(h) => PathBuf::from(h),
             Err(_) => PathBuf::from(env::var("HOME").unwrap_or_else(|_| ".".into())).join(".gitlarp"),
         };
-        Ctx { home, force }
+        Ctx { home, force, jitter }
     }
 
     fn config_path(&self) -> PathBuf {
@@ -50,26 +51,28 @@ fn main() {
     }
 }
 
-fn scan_args(args: &[String]) -> (bool, bool, Vec<String>) {
+fn scan_args(args: &[String]) -> (bool, bool, bool, Vec<String>) {
     let mut force = false;
     let mut dry = false;
+    let mut jitter = false;
     let mut rest = Vec::new();
     for a in args {
         match a.as_str() {
             "--force" => force = true,
             "--dry-run" => dry = true,
+            "--jitter" => jitter = true,
             _ => rest.push(a.clone()),
         }
     }
-    (force, dry, rest)
+    (force, dry, jitter, rest)
 }
 
 /// Entry point minus process-exit side effects, so tests can drive
 /// every command directly. Unknown/empty command yields the usage
 /// text as an error.
 fn run(args: &[String]) -> Result<(), String> {
-    let (force, dry, rest) = scan_args(args);
-    let ctx = Ctx::from_env(force);
+    let (force, dry, jitter, rest) = scan_args(args);
+    let ctx = Ctx::from_env(force, jitter);
     match rest.first().map(String::as_str) {
         Some("day") => day(&ctx, &rest[1..], dry),
         Some("fill") => fill(&ctx, &rest[1..], dry),
@@ -251,7 +254,7 @@ fn day(ctx: &Ctx, args: &[String], dry: bool) -> Result<(), String> {
         .parse()
         .map_err(|_| t!("err.bad_count"))?;
     let plan = build_plan(&[(date, n)], ctx.force, date::today_utc(), CLI_CAPS).map_err(msg)?;
-    run_plan(&plan, dry)
+    run_plan(&plan, dry, ctx.jitter)
 }
 
 fn parse_fill(args: &[String]) -> Result<(Date, Date, u32, u32), String> {
@@ -297,14 +300,14 @@ fn fill(ctx: &Ctx, args: &[String], dry: bool) -> Result<(), String> {
         d = date::add_days(d, 1);
     }
     let plan = build_plan(&days, ctx.force, date::today_utc(), CLI_CAPS).map_err(msg)?;
-    run_plan(&plan, dry)
+    run_plan(&plan, dry, ctx.jitter)
 }
 
 fn msg(e: gitlarp_core::Error) -> String {
     e.message
 }
 
-fn run_plan(plan: &Plan, dry: bool) -> Result<(), String> {
+fn run_plan(plan: &Plan, dry: bool, jitter: bool) -> Result<(), String> {
     if plan.clamped > 0 {
         eprintln!("{}", t!("warn.clamped", n = plan.clamped));
     }
@@ -320,12 +323,13 @@ fn run_plan(plan: &Plan, dry: bool) -> Result<(), String> {
         return Ok(());
     }
     let tok = gh_token()?;
-    let result = gitlarp_core::block_on(engine::write_commits(
+    let result = gitlarp_core::block_on(engine::write_commits_opts(
         &GhTransport,
         &tok,
         &repo_name(),
         &plan.days,
         None,
+        engine::CommitOptions { jitter },
     ))
     .map_err(msg)?;
     if let Some(err) = &result.partial {
@@ -361,7 +365,7 @@ fn init() -> Result<(), String> {
     let gh = GhClient::new(&GhTransport, &tok, &repo_name());
     let (_, login) = gitlarp_core::block_on(gh.user()).map_err(msg)?;
     gitlarp_core::block_on(gh.ensure_repo(&login)).map_err(msg)?;
-    let ctx = Ctx::from_env(false);
+    let ctx = Ctx::from_env(false, false);
     fs::create_dir_all(&ctx.home).map_err(|e| e.to_string())?;
     config::save(&ctx.config_path(), &Config::default())?;
     println!(
@@ -573,7 +577,7 @@ fn cron_run(ctx: &Ctx, dry: bool) -> Result<(), String> {
         return Ok(());
     }
     let plan = build_plan(&days, false, now, CLI_CAPS).map_err(msg)?;
-    run_plan(&plan, dry)?;
+    run_plan(&plan, dry, ctx.jitter)?;
     if !dry {
         save_last(ctx, now)?;
     }
@@ -842,7 +846,7 @@ mod tests {
     #[test]
     fn state_roundtrip() {
         let tmp = std::env::temp_dir().join(format!("gitlarp-state-{}", fastrand::u32(..)));
-        let ctx = Ctx { home: tmp.clone(), force: false };
+        let ctx = Ctx { home: tmp.clone(), force: false, jitter: false };
         assert_eq!(load_last(&ctx).unwrap(), None);
         save_last(&ctx, date::parse("2026-08-24").unwrap()).unwrap();
         assert_eq!(load_last(&ctx).unwrap(), Some(date::parse("2026-08-24").unwrap()));
@@ -1010,9 +1014,11 @@ esac
 
     #[test]
     fn scan_args_splits_flags() {
-        let (force, dry, rest) = scan_args(&args(&["day", "2026-08-20", "3", "--dry-run", "--force"]));
+        let (force, dry, jitter, rest) =
+            scan_args(&args(&["day", "2026-08-20", "3", "--dry-run", "--force", "--jitter"]));
         assert!(force);
         assert!(dry);
+        assert!(jitter);
         assert_eq!(rest, vec!["day".to_string(), "2026-08-20".to_string(), "3".to_string()]);
     }
 
@@ -1173,7 +1179,7 @@ esac
     #[test]
     fn e2e_cron_nothing_due_saves_state() {
         with_gitlarp_home(|home| {
-            let ctx = Ctx { home: home.to_path_buf(), force: false };
+            let ctx = Ctx { home: home.to_path_buf(), force: false, jitter: false };
             config::save(
                 &ctx.config_path(),
                 &Config { schedule: Some(config::Schedule { from: None, to: None, min: 1, max: 4, weekends: true, catchup: 14 }) },
@@ -1191,7 +1197,7 @@ esac
         with_gitlarp_home(|home| {
             run(&args(&["schedule", "--min", "1", "--max", "4", "--no-weekends"])).unwrap();
             assert!(home.join("config.toml").exists());
-            let ctx = Ctx { home: home.to_path_buf(), force: false };
+            let ctx = Ctx { home: home.to_path_buf(), force: false, jitter: false };
             let c = config::load(&ctx.config_path()).unwrap();
             let s = c.schedule.clone().unwrap();
             assert_eq!((s.min, s.max, s.weekends), (1, 4, false));

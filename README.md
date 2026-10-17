@@ -40,8 +40,9 @@ gitlarp wipe
 - `wipe`: reset the repo to `gitlarp-base`, undoing every larp commit
 - `--dry-run`: print the plan without committing or pushing
 - `--force`: allow out-of-window dates and >100 commits/day (cap becomes 1000)
+- `--jitter`: stamp commits at a random time within the day instead of 12:00 UTC
 
-Dates are clamped to the rolling 12-month window; commits are stamped 12:00 UTC. The repo is private and stays private.
+Dates are clamped to the rolling 12-month window; commits are stamped 12:00 UTC — or at a random time within the day with `--jitter`. The repo is private and stays private.
 
 ## Scheduling (auto-pilot)
 
@@ -76,6 +77,14 @@ sessionStorage) → `NEXT_PUBLIC_GITLARP_API_URL` (build time) →
 `http://localhost:8080`. The PAT travels in the `Authorization` header for
 graph fetches and in the JSON body for commits; the UI shows the exact API
 base it will be sent to next to the PAT input.
+
+The main page (not the widget) also has a Schedules panel: create, list,
+and delete auto-pilot schedules against the headless API, with upcoming
+scheduled days previewed as dashed ghost cells on the graph. When the API
+server has no `GITLARP_SCHEDULE_SECRET`, scheduling is disabled and the
+panel says so. A Reset button undoes every larp commit
+(`DELETE /api/commits`), and a "jitter times" checkbox stamps applied
+commits at random times within the day.
 
 One core, four shells. `apps/core` (Rust) holds every piece of domain
 logic: plan validation, schedules, the GitHub commit engine, crypto,
@@ -153,13 +162,21 @@ curl -X POST https://your-server.app/api/commits \
 - dates are `YYYY-MM-DD`; out-of-window dates are clamped to the rolling 12 months and counted in `clamped`
 - caps: 500 commits per request, 500 per day on `apps/server`; the Cloudflare worker enforces its own caps (40 per request, 40 per day) because Workers allows ~50 upstream fetches per invocation on the free plan — larger requests fail fast with a 400. Work is chunked into ≤50-commit sub-batches with ~1s delays; 403/429 retried once
 - the private repo `gitlarp-history` is auto-created on first use
+- optional `"jitter": true` stamps each commit at a uniform random time within its day instead of exactly 12:00 UTC (the CLI equivalent is `--jitter`)
 - full success: `{"created":3,"total":3}`
 - partial failure: `{"created":2,"total":3,"partial":true,"error":"..."}`
 - clamped dates add `"clamped":1`
 
+`DELETE /api/commits` (Authorization: Bearer PAT) undoes every larp
+commit: the default branch resets to `gitlarp-base`
+(`{"kind":"reset","sha":"..."}`), or is deleted when the repo was empty
+when larping started (`{"kind":"deleted","branch":"..."}`). Nothing to
+wipe → `400 {"error":"nothing to wipe (no gitlarp-base, no remote branch)"}`.
+Works on both the server and the worker.
+
 `GET /api/graph` returns `{"counts":{"YYYY-MM-DD":n}}` for the last 12 months.
 
-Auth: `Authorization: Bearer <PAT>` on `GET /api/graph` and
+Auth: `Authorization: Bearer <PAT>` on `GET /api/graph`, `DELETE /api/commits`, and
 `GET|DELETE /api/schedules` — the PAT lives in the header only, never in
 URLs (a `?pat=` query parameter existed once and was removed; it put live
 tokens in proxies' logs and browser history). `POST /api/commits` and
@@ -193,14 +210,18 @@ curl -X POST https://your-server.app/api/schedules/run \
 - failure policy: a run that fails leaves `lastRun` untouched and retries the window on the next tick; partial successes are marked done
 
 Rate limiting: fixed window of 30 req/min per IP on every endpoint that
-talks to upstream GitHub (`POST /api/commits`, `POST /api/schedules`,
-`POST /api/schedules/run`, `DELETE /api/schedules`, `GET /api/schedules`,
-and `GET /api/graph`, which costs two upstream calls per request) —
+talks to upstream GitHub (`POST /api/commits`, `DELETE /api/commits`,
+`POST /api/schedules`, `POST /api/schedules/run`, `DELETE /api/schedules`,
+`GET /api/schedules`, and `GET /api/graph`, which costs two upstream
+calls per request) —
 enforced on both `apps/server` and `apps/worker`; over-limit → `429` +
 `Retry-After: 60`. `GET /healthz` stays exempt. The limiter keys on the
 direct TCP peer address (it deliberately does not trust `X-Forwarded-For`),
 so behind a reverse proxy every client shares one bucket — expose the
-server directly or account for that.
+server directly, account for that, or set `TRUST_PROXY=1`: the limiter
+then keys on the rightmost `X-Forwarded-For` entry (accurate behind
+exactly one proxy that appends the client address; spoofable left
+entries can shift buckets but never grant extra quota). Off by default.
 
 Errors: core 4xx (validation: bad dates, missing pat, caps, invalid
 PAT, unknown schedule) pass through verbatim; anything else maps to
@@ -217,6 +238,7 @@ decrypts). CORS `*`.
 | `SCHEDULE_DIR` | server | schedule store dir (default `./data/schedules`) |
 | `GITLARP_SCHEDULE_SECRET` | server, worker | schedule encryption + run-endpoint bearer; unset ⇒ run 503s, scheduling disabled. Must be ≥16 **bytes** and random (`openssl rand -base64 32`), not a passphrase: the AES key is a plain SHA-256 of it, and the server refuses to boot / the worker fail-closes with shorter secrets |
 | `GITLARP_SCHEDULE_SECRET_OLD` | server | lazy-rotation fallback decrypt (runner heals on run and on read; worker: none — GET heals) |
+| `TRUST_PROXY` | server | `1` = rate limiter keys on the rightmost X-Forwarded-For entry instead of the TCP peer (single-reverse-proxy deployments); unset/anything else = off |
 | `SCHEDULE_LOOP` | server | `1` = hourly in-process scheduler |
 | `GH_TOKEN` / gh auth | CLI | transport auth (never argv) |
 | `GITLARP_HOME`, `GITLARP_REPO` | CLI | config dir / repo name |

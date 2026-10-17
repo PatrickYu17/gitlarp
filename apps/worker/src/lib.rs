@@ -662,7 +662,21 @@ async fn commits(mut req: Request, _ctx: RouteContext<()>) -> worker::Result<Res
         Ok(p) => p,
         Err(e) => return core_err(e),
     };
-    match engine::write_commits(&WorkerRuntime, &pat, gh::DEFAULT_REPO, &p.days, None).await {
+    let jitter = match body.get("jitter") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(b)) => *b,
+        Some(_) => return err_json("jitter must be a boolean", 400),
+    };
+    match engine::write_commits_opts(
+        &WorkerRuntime,
+        &pat,
+        gh::DEFAULT_REPO,
+        &p.days,
+        None,
+        engine::CommitOptions { jitter },
+    )
+    .await
+    {
         Ok(r) => {
             let mut out = json!({ "created": r.created, "total": r.total });
             if let Some(err) = &r.partial {
@@ -674,6 +688,17 @@ async fn commits(mut req: Request, _ctx: RouteContext<()>) -> worker::Result<Res
             }
             json_res(out, 200)
         }
+        Err(e) => core_err(e),
+    }
+}
+
+async fn commits_delete(req: Request, _ctx: RouteContext<()>) -> worker::Result<Response> {
+    let auth = req.headers().get("Authorization").ok().flatten();
+    let Some(pat) = policy::extract_pat(auth.as_deref()) else {
+        return err_json("missing pat", 400);
+    };
+    match engine::wipe(&WorkerRuntime, &pat, gh::DEFAULT_REPO, None).await {
+        Ok(outcome) => json_res(to_value(&outcome), 200),
         Err(e) => core_err(e),
     }
 }
@@ -853,6 +878,7 @@ type RouteFn = Box<dyn Fn(Request, RouteContext<()>) -> RouteFut>;
 enum H {
     Healthz,
     Commits,
+    CommitsDelete,
     Options,
     Graph,
     SchedulesGet,
@@ -875,6 +901,7 @@ struct Route {
 const ROUTES: &[Route] = &[
     Route { method: Method::Get, path: "/healthz", gated: false, handler: H::Healthz },
     Route { method: Method::Post, path: "/api/commits", gated: true, handler: H::Commits },
+    Route { method: Method::Delete, path: "/api/commits", gated: true, handler: H::CommitsDelete },
     Route { method: Method::Options, path: "/api/commits", gated: false, handler: H::Options },
     Route { method: Method::Get, path: "/api/graph", gated: true, handler: H::Graph },
     Route { method: Method::Options, path: "/api/graph", gated: false, handler: H::Options },
@@ -900,6 +927,7 @@ fn route(r: &'static Route) -> RouteFn {
             match r.handler {
                 H::Healthz => healthz(req, ctx).await,
                 H::Commits => commits(req, ctx).await,
+                H::CommitsDelete => commits_delete(req, ctx).await,
                 H::Options => options(req, ctx).await,
                 H::Graph => graph(req, ctx).await,
                 H::SchedulesGet => schedules_get(req, ctx).await,
@@ -992,6 +1020,7 @@ mod tests {
         for route in [
             "Get /healthz",
             "Post /api/commits",
+            "Delete /api/commits",
             "Options /api/commits",
             "Get /api/graph",
             "Options /api/graph",
@@ -1004,7 +1033,7 @@ mod tests {
         ] {
             assert!(served.contains(&route.to_string()), "missing route {route}");
         }
-        assert_eq!(served.len(), 11, "no stray routes: {served:?}");
+        assert_eq!(served.len(), 12, "no stray routes: {served:?}");
     }
 
     /// Cross-origin widget fetches preflight every request that carries

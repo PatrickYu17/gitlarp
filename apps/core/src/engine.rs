@@ -1,6 +1,10 @@
 //! The commit engine: writes backdated commits to the private
 //! gitlarp-history repo over the GitHub REST API.
 //!
+//! Commit timestamps default to 12:00 UTC of each day; pass
+//! `CommitOptions { jitter: true }` to stamp each commit at a uniform
+//! random second within its day instead.
+//!
 //! Guarantees (same contract as the old TS engine): if this returns
 //! Err, no reachable commit was created, so retrying is safe. If it
 //! returns Ok, `created > 0` and the branch ref was updated (a
@@ -42,12 +46,41 @@ pub enum WipeOutcome {
     Deleted { branch: String },
 }
 
+/// Per-run commit knobs. `jitter` stamps each commit at a uniform
+/// random second within its day (drawn from Runtime::random) instead
+/// of a fixed 12:00 UTC — a single fixed time on every commit is an
+/// obvious fingerprint.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CommitOptions {
+    pub jitter: bool,
+}
+
+/// `YYYY-MM-DDTHH:MM:SSZ` at a uniform random second of the day;
+/// every commit draws fresh entropy.
+fn jittered_timestamp(rt: &dyn Runtime, ds: &str) -> String {
+    let mut b = [0u8; 4];
+    rt.random(&mut b);
+    let secs = u32::from_le_bytes(b) % 86_400;
+    format!("{ds}T{:02}:{:02}:{:02}Z", secs / 3600, (secs % 3600) / 60, secs % 60)
+}
+
 pub async fn write_commits(
     rt: &dyn Runtime,
     pat: &str,
     repo: &str,
     days: &[(Date, u32)],
     branch: Option<&str>,
+) -> Result<CommitResult, Error> {
+    write_commits_opts(rt, pat, repo, days, branch, CommitOptions::default()).await
+}
+
+pub async fn write_commits_opts(
+    rt: &dyn Runtime,
+    pat: &str,
+    repo: &str,
+    days: &[(Date, u32)],
+    branch: Option<&str>,
+    opts: CommitOptions,
 ) -> Result<CommitResult, Error> {
     let gh = GhClient::new(rt, pat, repo);
     let (user_id, login) = gh.user().await?;
@@ -83,7 +116,8 @@ pub async fn write_commits(
         for &(date, count) in chunk {
             let ds = crate::date::fmt(date);
             for _ in 0..count {
-                match gh.create_commit(&login, &email, &ds, &tree_sha, Some(&parent)).await {
+                let ts = if opts.jitter { jittered_timestamp(rt, &ds) } else { format!("{ds}T12:00:00Z") };
+                match gh.create_commit_at(&login, &email, &ds, &ts, &tree_sha, Some(&parent)).await {
                     Ok(sha) => {
                         parent = sha;
                         created += 1;
@@ -245,6 +279,56 @@ mod tests {
         let b = json_body(upd);
         assert_eq!(b["sha"], "c2");
         assert_eq!(b["force"], true);
+    }
+
+    #[test]
+    fn jittered_commits_get_a_time_within_the_day() {
+        let mut q: VecDeque<_> = user_and_repo().into();
+        q.push_back(nf()); // get branch -> 404
+        q.push_back(ok(serde_json::json!({ "sha": "blob" })));
+        q.push_back(ok(serde_json::json!({ "sha": "tree" })));
+        q.push_back(ok(serde_json::json!({ "sha": "seed" })));
+        q.push_back(ok(serde_json::json!({}))); // create branch ref
+        q.push_back(ok(serde_json::json!({ "sha": "c1" })));
+        q.push_back(ok(serde_json::json!({ "sha": "c2" })));
+        q.push_back(ok(serde_json::json!({}))); // update ref
+        let m = mock(q);
+        let days = [(date!(2026-08-20), 1), (date!(2026-08-21), 1)];
+        let r = crate::block_on(write_commits_opts(
+            &m, "pat", "gitlarp-history", &days, None,
+            CommitOptions { jitter: true },
+        )).unwrap();
+        assert_eq!(r.created, 2);
+        let calls = m.calls.lock().unwrap();
+        let c1 = json_body(&calls[7]);
+        // Mock::random yields bytes [0,1,2,3] -> le u32 0x03020100 -> % 86400 = 5376 -> 01:29:36
+        assert_eq!(c1["author"]["date"], "2026-08-20T01:29:36Z");
+        assert_eq!(c1["committer"]["date"], "2026-08-20T01:29:36Z");
+        assert_eq!(c1["message"], "2026-08-20", "the message stays the plain date");
+    }
+
+    #[test]
+    fn default_options_keep_noon_stamps() {
+        let mut q: VecDeque<_> = user_and_repo().into();
+        q.push_back(nf()); // get branch -> 404
+        q.push_back(ok(serde_json::json!({ "sha": "blob" })));
+        q.push_back(ok(serde_json::json!({ "sha": "tree" })));
+        q.push_back(ok(serde_json::json!({ "sha": "seed" })));
+        q.push_back(ok(serde_json::json!({}))); // create branch ref
+        q.push_back(ok(serde_json::json!({ "sha": "c1" })));
+        q.push_back(ok(serde_json::json!({ "sha": "c2" })));
+        q.push_back(ok(serde_json::json!({}))); // update ref
+        let m = mock(q);
+        let days = [(date!(2026-08-20), 1), (date!(2026-08-21), 1)];
+        let r = crate::block_on(write_commits_opts(
+            &m, "pat", "gitlarp-history", &days, None,
+            CommitOptions::default(),
+        )).unwrap();
+        assert_eq!(r.created, 2);
+        let calls = m.calls.lock().unwrap();
+        let c1 = json_body(&calls[7]);
+        assert_eq!(c1["author"]["date"], "2026-08-20T12:00:00Z");
+        assert_eq!(c1["committer"]["date"], "2026-08-20T12:00:00Z");
     }
 
     #[test]

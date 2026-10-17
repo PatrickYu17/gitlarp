@@ -3,6 +3,8 @@
 //! Endpoints:
 //!
 //! - `POST /api/commits`: write backdated commits (pat in body)
+//! - `DELETE /api/commits`: undo every larp commit — reset the default
+//!   branch to gitlarp-base, or delete it (pat in the header)
 //! - `GET /api/graph`: contribution calendar for a PAT
 //! - `GET /api/schedules`: list a user's schedules (decrypted)
 //! - `POST /api/schedules`: create a schedule (pat in body)
@@ -26,6 +28,8 @@
 //! protecting stored PATs and the AES key is a plain SHA-256 of it.
 
 use std::collections::HashMap;
+use std::net::IpAddr;
+use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -163,6 +167,11 @@ struct AppState {
     secret: Option<String>,
     /// Previous secret, for lazy rotation heal.
     old_secret: Option<String>,
+    /// Opt-in (`TRUST_PROXY=1`): rate-limit keys come from the
+    /// rightmost X-Forwarded-For entry instead of the TCP peer
+    /// address. Only accurate behind exactly one proxy that appends
+    /// the client address; the header is client-spoofable otherwise.
+    trust_proxy: bool,
     limiter: RateLimiter,
     /// Serializes every commit-writing path (POST /api/commits, the
     /// runner, the hourly loop): engine runs are not atomic against
@@ -242,12 +251,39 @@ fn pat_from(req: &HttpRequest) -> String {
         .unwrap_or_default()
 }
 
+/// The limiter key for a request: the direct TCP peer address, or —
+/// only when `TRUST_PROXY=1` — the RIGHTMOST `X-Forwarded-For` entry
+/// (the one our own trusted proxy appended; anything further left is
+/// client-supplied and spoofable). An unparseable value falls back to
+/// the peer address; a spoofed leftmost entry can shift a bucket but
+/// never grants extra quota. Only accurate behind exactly one proxy
+/// that appends the client address to XFF.
+fn limiter_key(req: &HttpRequest, trust_proxy: bool) -> String {
+    let xff = req
+        .headers()
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok());
+    limiter_key_parts(xff, req.peer_addr().map(|a| a.ip()), trust_proxy)
+}
+
+/// Pure core of `limiter_key`, split out so the trust logic is unit
+/// testable without building a request.
+fn limiter_key_parts(xff: Option<&str>, peer: Option<IpAddr>, trust_proxy: bool) -> String {
+    if trust_proxy {
+        if let Some(xff) = xff {
+            if let Some(last) = xff.rsplit(',').next().map(str::trim) {
+                if IpAddr::from_str(last).is_ok() {
+                    return last.to_string();
+                }
+            }
+        }
+    }
+    peer.map(|a| a.to_string()).unwrap_or_else(|| "unknown".to_string())
+}
+
 fn rate_guard(state: &web::Data<AppState>, req: &HttpRequest) -> Option<HttpResponse> {
-    let ip = req
-        .peer_addr()
-        .map(|a| a.ip().to_string())
-        .unwrap_or_else(|| "unknown".to_string());
-    if state.limiter.allow(&ip) {
+    let key = limiter_key(req, state.trust_proxy);
+    if state.limiter.allow(&key) {
         None
     } else {
         Some(
@@ -298,11 +334,25 @@ async fn commits_post(
         Ok(p) => p,
         Err(e) => return core_error(e),
     };
+    // jitter: absent/null/false = fixed noon stamp; true = random
+    // second-of-day per commit (engine::CommitOptions)
+    let jitter = match body.get("jitter") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(b)) => *b,
+        Some(_) => return bad_request("jitter must be a boolean"),
+    };
     // serialize against the runner and the hourly loop: interleaved
     // engine runs lose commits to force-patched refs
     let _write = state.write_lock.lock().await;
-    match engine::write_commits(state.rt.as_ref(), pat, gh::DEFAULT_REPO, &plan.days, None)
-        .await
+    match engine::write_commits_opts(
+        state.rt.as_ref(),
+        pat,
+        gh::DEFAULT_REPO,
+        &plan.days,
+        None,
+        engine::CommitOptions { jitter },
+    )
+    .await
     {
         Ok(res) => {
             let mut out = json!({ "created": res.created, "total": res.total });
@@ -314,6 +364,28 @@ async fn commits_post(
                 out["clamped"] = json!(plan.clamped);
             }
             HttpResponse::Ok().json(out)
+        }
+        Err(e) => core_error(e),
+    }
+}
+
+/// `DELETE /api/commits`: undo every larp commit — reset the default
+/// branch to gitlarp-base, or delete it when the repo was empty when
+/// larping started. PAT in the Authorization: Bearer header.
+async fn commits_delete(state: web::Data<AppState>, req: HttpRequest) -> HttpResponse {
+    if let Some(resp) = rate_guard(&state, &req) {
+        return resp;
+    }
+    let pat = pat_from(&req);
+    if pat.is_empty() {
+        return bad_request("missing pat");
+    }
+    // serialize against POST /api/commits and the runner: a wipe
+    // racing a commit run resets the ref underneath it
+    let _write = state.write_lock.lock().await;
+    match engine::wipe(state.rt.as_ref(), &pat, gh::DEFAULT_REPO, None).await {
+        Ok(outcome) => {
+            HttpResponse::Ok().json(serde_json::to_value(&outcome).unwrap_or_else(|_| json!({})))
         }
         Err(e) => core_error(e),
     }
@@ -556,6 +628,7 @@ fn build_app(
         .service(
             web::resource("/api/commits")
                 .route(web::post().to(commits_post))
+                .route(web::delete().to(commits_delete))
                 .route(web::method(Method::OPTIONS).to(cors_preflight)),
         )
         .service(
@@ -687,6 +760,13 @@ async fn main() -> std::io::Result<()> {
         std::env::var("SCHEDULE_DIR").unwrap_or_else(|_| "./data/schedules".into());
     let secret = nonempty_env("GITLARP_SCHEDULE_SECRET");
     let old_secret = nonempty_env("GITLARP_SCHEDULE_SECRET_OLD");
+    // Opt-in and strict: only the literal `1` enables it, so a stray
+    // "0"/"true"/"yes" can never silently widen the buckets'
+    // spoofability behind a proxy that doesn't sanitize XFF.
+    let trust_proxy = std::env::var("TRUST_PROXY").ok().as_deref() == Some("1");
+    if trust_proxy {
+        log::info!("TRUST_PROXY=1: rate limiter keys on the rightmost X-Forwarded-For entry");
+    }
 
     if let Some(s) = &secret {
         if let Err(msg) = check_secret(s) {
@@ -701,6 +781,7 @@ async fn main() -> std::io::Result<()> {
         store: Arc::new(FileStore::new(schedule_dir)),
         secret,
         old_secret,
+        trust_proxy,
         limiter: RateLimiter::new(),
         write_lock,
     });
@@ -753,7 +834,8 @@ mod tests {
     /// Canned GitHub: `p1` is user id 1 "tester", `p2` is id 2
     /// "tester2"; the calendar count echoes which login the GraphQL
     /// query targeted (1 for tester, 2 for tester2). The engine flow
-    /// runs against a fresh repo (branch ref 404 -> seed path).
+    /// runs against a fresh repo (branch ref 404 -> seed path, so the
+    /// gitlarp-base ref is only ever read by `wipe`).
     fn mock_fetch(req: CoreRequest) -> Result<CoreResponse, Error> {
         let path = req
             .url
@@ -807,6 +889,9 @@ mod tests {
             ("PATCH", "/repos/tester/gitlarp-history/git/refs/heads/main") => {
                 Ok(mock_ok(json!({})))
             }
+            ("GET", "/repos/tester/gitlarp-history/git/ref/heads/gitlarp-base") => {
+                Ok(mock_ok(json!({ "object": { "sha": "base-sha" } })))
+            }
             _ => Err(Error::new(500, format!("mock: unexpected {} {}", req.method, path))),
         }
     }
@@ -814,11 +899,12 @@ mod tests {
     /// State with a mock fetch (or the real one), a temp-dir store,
     /// and explicit secrets. Nothing here touches env vars, so tests
     /// can run fully in parallel.
-    fn test_state(
+    fn test_state_opts(
         dir: PathBuf,
         secret: Option<&str>,
         old_secret: Option<&str>,
         mock: bool,
+        trust_proxy: bool,
     ) -> web::Data<AppState> {
         web::Data::new(AppState {
             rt: Arc::new(ServerRuntime::new(if mock {
@@ -829,9 +915,21 @@ mod tests {
             store: Arc::new(FileStore::new(&dir)),
             secret: secret.map(str::to_string),
             old_secret: old_secret.map(str::to_string),
+            trust_proxy,
             limiter: RateLimiter::new(),
             write_lock: Arc::new(tokio::sync::Mutex::new(())),
         })
+    }
+
+    /// `test_state_opts` with the default `trust_proxy: false` (the
+    /// limiter keys on the TCP peer, X-Forwarded-For ignored).
+    fn test_state(
+        dir: PathBuf,
+        secret: Option<&str>,
+        old_secret: Option<&str>,
+        mock: bool,
+    ) -> web::Data<AppState> {
+        test_state_opts(dir, secret, old_secret, mock, false)
     }
 
     fn bearer(v: &str) -> (&'static str, String) {
@@ -931,6 +1029,98 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
+    // -- (b2) wipe: DELETE /api/commits ------------------------------------
+
+    #[actix_web::test]
+    async fn wipe_missing_pat_is_400() {
+        let dir = temp_root();
+        let state = test_state(dir.clone(), Some("S"), None, true);
+        let app = test::init_service(build_app(state)).await;
+        let req = TestRequest::delete().uri("/api/commits").to_request();
+        let (status, v) = call_json(&app, req).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(v["error"], "missing pat");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// The mock answers the gitlarp-base ref GET with "base-sha", so a
+    /// wipe for `p1` resets the default branch to it (`WipeOutcome`
+    /// serializes with `tag = "kind"`).
+    #[actix_web::test]
+    async fn wipe_resets_the_default_branch_to_base() {
+        let dir = temp_root();
+        let state = test_state(dir.clone(), Some("S"), None, true);
+        let app = test::init_service(build_app(state)).await;
+        let req = TestRequest::delete()
+            .uri("/api/commits")
+            .insert_header(bearer("p1"))
+            .to_request();
+        let (status, v) = call_json(&app, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(v, json!({ "kind": "reset", "sha": "base-sha" }));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// Core 4xx errors pass through verbatim: a bad PAT is GitHub's
+    /// 401, re-served as-is (not mapped to 502).
+    #[actix_web::test]
+    async fn wipe_bad_pat_is_401() {
+        let dir = temp_root();
+        let state = test_state(dir.clone(), Some("S"), None, true);
+        let app = test::init_service(build_app(state)).await;
+        let req = TestRequest::delete()
+            .uri("/api/commits")
+            .insert_header(bearer("pbad"))
+            .to_request();
+        let (status, v) = call_json(&app, req).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(v["error"], "invalid PAT");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    // -- (b3) commit jitter -------------------------------------------------
+
+    /// `"jitter": true` must wire through to engine::CommitOptions; the
+    /// mock doesn't inspect timestamps, so exact instants are covered
+    /// by the core engine tests — here we prove the flag is accepted
+    /// and the run still succeeds.
+    #[actix_web::test]
+    async fn commits_accept_jitter_true() {
+        let dir = temp_root();
+        let state = test_state(dir.clone(), Some("S"), None, true);
+        let app = test::init_service(build_app(state)).await;
+        let today = date::fmt(date::today_utc());
+        let req = TestRequest::post()
+            .uri("/api/commits")
+            .set_json(json!({ "pat": "p1", "jitter": true, "days": [
+                { "date": today, "count": 2 }
+            ] }))
+            .to_request();
+        let (status, v) = call_json(&app, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(v["created"], 2);
+        assert_eq!(v["total"], 2);
+        assert!(v.get("partial").is_none());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[actix_web::test]
+    async fn commits_reject_non_boolean_jitter() {
+        let dir = temp_root();
+        let state = test_state(dir.clone(), Some("S"), None, true);
+        let app = test::init_service(build_app(state)).await;
+        let req = TestRequest::post()
+            .uri("/api/commits")
+            .set_json(json!({ "pat": "p1", "jitter": "yes", "days": [
+                { "date": date::fmt(date::today_utc()), "count": 1 }
+            ] }))
+            .to_request();
+        let (status, v) = call_json(&app, req).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(v["error"], "jitter must be a boolean");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
     // -- (c) graph ----------------------------------------------------------
 
     #[actix_web::test]
@@ -986,6 +1176,75 @@ mod tests {
         let (status, v) = call_json(&app, req).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(v["error"], "missing pat");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    // -- (c) CORS preflights -----------------------------------------------
+
+    /// Every resource answers OPTIONS with a bare 204; the CORS headers
+    /// come from the DefaultHeaders middleware wrapping every response.
+    #[actix_web::test]
+    async fn cors_preflights_answer_204_with_open_headers() {
+        let dir = temp_root();
+        let state = test_state(dir.clone(), Some("S"), None, true);
+        let app = test::init_service(build_app(state)).await;
+        for path in ["/api/commits", "/api/graph", "/api/schedules", "/api/schedules/run"] {
+            let req = TestRequest::default()
+                .method(Method::OPTIONS)
+                .uri(path)
+                .to_request();
+            let resp = test::call_service(&app, req).await;
+            assert_eq!(resp.status(), StatusCode::NO_CONTENT, "preflight {path}");
+            let headers = resp.headers();
+            assert_eq!(
+                headers.get("Access-Control-Allow-Origin").and_then(|v| v.to_str().ok()),
+                Some("*"),
+                "origin header on {path}"
+            );
+            let methods = headers
+                .get("Access-Control-Allow-Methods")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default();
+            for m in ["GET", "POST", "DELETE", "OPTIONS"] {
+                assert!(methods.contains(m), "{m} missing on {path}: {methods}");
+            }
+            let allowed = headers
+                .get("Access-Control-Allow-Headers")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default();
+            assert!(allowed.contains("Authorization"), "headers on {path}: {allowed}");
+            assert!(allowed.contains("Content-Type"), "headers on {path}: {allowed}");
+        }
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// Preflights never reach rate_guard: even with the per-IP budget
+    /// exhausted, OPTIONS still answers (a blocked preflight would
+    /// break every cross-origin browser client, not just the noisy one).
+    #[actix_web::test]
+    async fn cors_preflights_are_exempt_from_the_limiter() {
+        let dir = temp_root();
+        let state = test_state(dir.clone(), Some("S"), None, true);
+        let app = test::init_service(build_app(state)).await;
+        for i in 0..=RATE_MAX_PER_WINDOW {
+            let req = TestRequest::get()
+                .uri("/api/graph")
+                .insert_header(bearer("p1"))
+                .to_request();
+            let resp = test::call_service(&app, req).await;
+            let expected = if i < RATE_MAX_PER_WINDOW {
+                StatusCode::OK
+            } else {
+                StatusCode::TOO_MANY_REQUESTS
+            };
+            assert_eq!(resp.status(), expected, "graph call {i}");
+        }
+        let req = TestRequest::default()
+            .method(Method::OPTIONS)
+            .uri("/api/graph")
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
         std::fs::remove_dir_all(dir).ok();
     }
 
@@ -1074,6 +1333,32 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
+    // -- (d) header-only PAT transport on the schedules routes --------------
+
+    #[actix_web::test]
+    async fn schedules_get_without_pat_is_400() {
+        let dir = temp_root();
+        let state = test_state(dir.clone(), Some("S"), None, true);
+        let app = test::init_service(build_app(state)).await;
+        let req = TestRequest::get().uri("/api/schedules").to_request();
+        let (status, v) = call_json(&app, req).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(v["error"], "missing pat");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[actix_web::test]
+    async fn schedules_delete_without_pat_is_400() {
+        let dir = temp_root();
+        let state = test_state(dir.clone(), Some("S"), None, true);
+        let app = test::init_service(build_app(state)).await;
+        let req = TestRequest::delete().uri("/api/schedules?id=x").to_request();
+        let (status, v) = call_json(&app, req).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(v["error"], "missing pat");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
     #[actix_web::test]
     async fn schedules_undecryptable_record_renders_broken() {
         let dir = temp_root();
@@ -1122,6 +1407,21 @@ mod tests {
             .uri("/api/schedules/run")
             .insert_header(bearer("wrong"))
             .to_request();
+        let (status, v) = call_json(&app, req).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(v["error"], "invalid bearer token");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// No Authorization header at all is the same 401 as a wrong
+    /// bearer: the empty compare must not leak a distinction (an empty
+    /// string is never equal to a configured secret).
+    #[actix_web::test]
+    async fn run_rejects_missing_header_with_401() {
+        let dir = temp_root();
+        let state = test_state(dir.clone(), Some("S"), None, true);
+        let app = test::init_service(build_app(state)).await;
+        let req = TestRequest::post().uri("/api/schedules/run").to_request();
         let (status, v) = call_json(&app, req).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
         assert_eq!(v["error"], "invalid bearer token");
@@ -1311,6 +1611,128 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
+    /// Buckets are per peer address: exhausting one IP's budget must
+    /// not touch another peer's (needs `TestRequest::peer_addr`,
+    /// available since actix-web 4.0).
+    #[actix_web::test]
+    async fn limiter_buckets_are_isolated_per_peer_address() {
+        let dir = temp_root();
+        let state = test_state(dir.clone(), Some("S"), None, true);
+        let app = test::init_service(build_app(state)).await;
+        let addr = |ip: &str| -> std::net::SocketAddr { format!("{ip}:1").parse().unwrap() };
+        // exhaust 10.0.0.1's budget (each call resolves the user, finds no schedule -> 404)
+        for i in 0..RATE_MAX_PER_WINDOW {
+            let req = TestRequest::delete()
+                .uri("/api/schedules?id=x")
+                .insert_header(bearer("p1"))
+                .peer_addr(addr("10.0.0.1"))
+                .to_request();
+            let resp = test::call_service(&app, req).await;
+            assert_eq!(resp.status(), StatusCode::NOT_FOUND, "call {i} under the limit");
+        }
+        // same peer is now over the limit
+        let req = TestRequest::delete()
+            .uri("/api/schedules?id=x")
+            .insert_header(bearer("p1"))
+            .peer_addr(addr("10.0.0.1"))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        // a different peer is untouched by 10.0.0.1's flood
+        let req = TestRequest::delete()
+            .uri("/api/schedules?id=x")
+            .insert_header(bearer("p1"))
+            .peer_addr(addr("10.0.0.2"))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    // -- (g) TRUST_PROXY ----------------------------------------------------
+
+    /// The XFF decision table: only the rightmost entry is trusted (the
+    /// one our own proxy appended), and only when TRUST_PROXY=1.
+    #[test]
+    fn limiter_key_trusts_only_the_rightmost_xff_entry() {
+        let peer = Some(IpAddr::from([10, 0, 0, 9]));
+        // trusted: rightmost XFF wins; the spoofable leftmost is ignored
+        assert_eq!(
+            limiter_key_parts(Some("1.2.3.4, 5.6.7.8"), peer, true),
+            "5.6.7.8"
+        );
+        // whitespace around the entry is trimmed
+        assert_eq!(limiter_key_parts(Some(" 9.9.9.9 "), peer, true), "9.9.9.9");
+        // unparseable XFF falls back to the peer
+        assert_eq!(limiter_key_parts(Some("not-an-ip"), peer, true), "10.0.0.9");
+        // empty / comma-only garbage -> peer as well
+        assert_eq!(limiter_key_parts(Some(""), peer, true), "10.0.0.9");
+        assert_eq!(limiter_key_parts(Some(","), peer, true), "10.0.0.9");
+        // no XFF -> peer
+        assert_eq!(limiter_key_parts(None, peer, true), "10.0.0.9");
+        // untrusted: the header is ignored entirely
+        assert_eq!(limiter_key_parts(Some("1.2.3.4"), peer, false), "10.0.0.9");
+        // no peer at all -> the shared "unknown" bucket
+        assert_eq!(limiter_key_parts(Some("1.2.3.4"), None, false), "unknown");
+        assert_eq!(limiter_key_parts(None, None, false), "unknown");
+    }
+
+    /// With TRUST_PROXY=1, each forwarded client gets its own bucket
+    /// keyed on the XFF address (test requests carry no peer address,
+    /// so the XFF value is the entire key here).
+    #[actix_web::test]
+    async fn trust_proxy_keys_the_limiter_on_the_xff_address() {
+        let dir = temp_root();
+        let state = test_state_opts(dir.clone(), Some("S"), None, true, true);
+        let app = test::init_service(build_app(state)).await;
+        let call = |xff: &'static str| {
+            TestRequest::delete()
+                .uri("/api/schedules?id=x")
+                .insert_header(bearer("p1"))
+                .insert_header(("X-Forwarded-For", xff))
+                .to_request()
+        };
+        for i in 0..RATE_MAX_PER_WINDOW {
+            let resp = test::call_service(&app, call("203.0.113.5")).await;
+            assert_eq!(resp.status(), StatusCode::NOT_FOUND, "call {i} under the limit");
+        }
+        // 31st from the same forwarded client: over the limit
+        let resp = test::call_service(&app, call("203.0.113.5")).await;
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        // another forwarded client has its own bucket
+        let resp = test::call_service(&app, call("203.0.113.6")).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// Default (TRUST_PROXY unset): XFF values are ignored, so varying
+    /// them all lands in one bucket — exactly the single-proxy problem
+    /// TRUST_PROXY exists to solve, kept as the safe default.
+    #[actix_web::test]
+    async fn without_trust_proxy_varying_xff_values_share_one_bucket() {
+        let dir = temp_root();
+        let state = test_state(dir.clone(), Some("S"), None, true);
+        let app = test::init_service(build_app(state)).await;
+        for i in 0..RATE_MAX_PER_WINDOW {
+            let xff = format!("203.0.113.{}", i % 250 + 1);
+            let req = TestRequest::delete()
+                .uri("/api/schedules?id=x")
+                .insert_header(bearer("p1"))
+                .insert_header(("X-Forwarded-For", xff))
+                .to_request();
+            let resp = test::call_service(&app, req).await;
+            assert_eq!(resp.status(), StatusCode::NOT_FOUND, "call {i} under the limit");
+        }
+        let req = TestRequest::delete()
+            .uri("/api/schedules?id=x")
+            .insert_header(bearer("p1"))
+            .insert_header(("X-Forwarded-For", "203.0.113.1"))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
     /// healthz must stay exempt from the limiter even after graph has
     /// exhausted the per-IP budget.
     #[actix_web::test]
@@ -1387,6 +1809,24 @@ mod tests {
             .to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// Malformed JSON stays in the `{"error": ...}` shape via the
+    /// JsonConfig error handler, not actix's default plain-text body.
+    #[actix_web::test]
+    async fn malformed_json_body_is_400_with_error_shape() {
+        let dir = temp_root();
+        let state = test_state(dir.clone(), Some("S"), None, true);
+        let app = test::init_service(build_app(state)).await;
+        let req = TestRequest::post()
+            .uri("/api/commits")
+            .insert_header(("content-type", "application/json"))
+            .set_payload("{oops")
+            .to_request();
+        let (status, v) = call_json(&app, req).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(v.get("error").is_some(), "expected error shape, got: {v}");
         std::fs::remove_dir_all(dir).ok();
     }
 
