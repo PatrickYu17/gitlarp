@@ -21,6 +21,11 @@ follows Cargo's version numbers.
   Docker deploy usable behind one reverse proxy. Off by default — the
   header is client-spoofable without a sanitizing proxy, and the
   rightmost entry is the only one our own proxy controls.
+- Web UI: a Schedules panel — create/list/delete schedules with
+  `lastRun`, a clear 503 "scheduling disabled" state, and upcoming
+  scheduled days previewed as dashed ghost cells on the graph (the web
+  app could previously only read the graph and apply plans); a Reset
+  button (`DELETE /api/commits`) and a "jitter times" checkbox.
 - Server: integration tests for CORS preflights (204 + headers, exempt
   from the limiter), missing-PAT 400s on the schedules routes, the run
   endpoint's no-header 401, per-IP limiter isolation, and malformed-JSON
