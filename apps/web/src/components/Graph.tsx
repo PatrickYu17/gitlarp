@@ -87,6 +87,7 @@ export default function Graph({
   const [graphErr, setGraphErr] = useState("");
   const [loading, setLoading] = useState(false);
   const [attempt, setAttempt] = useState(0);
+  const [jitter, setJitter] = useState(false);
 
   const envBase = process.env.NEXT_PUBLIC_GITLARP_API_URL || DEFAULT_API_BASE;
   const resolvedBase = useMemo(
@@ -159,7 +160,7 @@ export default function Graph({
       const res = await fetch(`${apiBase}/api/commits`, {
         method: "POST",
         headers: { Authorization: `Bearer ${pat}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ pat, days: planDays }),
+        body: JSON.stringify({ pat, days: planDays, ...(jitter ? { jitter: true } : {}) }),
       });
       let body: {
         created?: number;
@@ -346,6 +347,15 @@ export default function Graph({
             <button disabled={busy} onClick={randomFill}>
               Random fill (into plan)
             </button>
+            <label htmlFor="gitlarp-jitter">
+              <input
+                id="gitlarp-jitter"
+                type="checkbox"
+                checked={jitter}
+                onChange={(e) => setJitter(e.target.checked)}
+              />
+              jitter times
+            </label>
           </>
         )}
         <button disabled={busy || !pat || !planCount} onClick={apply}>

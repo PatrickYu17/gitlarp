@@ -53,4 +53,13 @@ describe("<Graph />", () => {
     expect(m).toContain("PAT will be sent to: http://localhost:9999");
     expect(m).not.toContain("not HTTPS");
   });
+
+  test("tools render adds the jitter toggle", () => {
+    const m = renderToStaticMarkup(<Graph tools />);
+    expect(m).toContain('id="gitlarp-jitter"');
+  });
+
+  test("default render has no jitter toggle", () => {
+    expect(markup).not.toContain('id="gitlarp-jitter"');
+  });
 });
