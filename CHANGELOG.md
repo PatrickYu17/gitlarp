@@ -16,6 +16,11 @@ follows Cargo's version numbers.
 - `DELETE /api/commits` on both headless surfaces (server + worker): the
   CLI's `wipe` over the API — reset to `gitlarp-base` or delete the
   branch.
+- `TRUST_PROXY=1` on the server (opt-in): the rate limiter keys on the
+  rightmost `X-Forwarded-For` entry instead of the TCP peer, making the
+  Docker deploy usable behind one reverse proxy. Off by default — the
+  header is client-spoofable without a sanitizing proxy, and the
+  rightmost entry is the only one our own proxy controls.
 - Server: integration tests for CORS preflights (204 + headers, exempt
   from the limiter), missing-PAT 400s on the schedules routes, the run
   endpoint's no-header 401, per-IP limiter isolation, and malformed-JSON
