@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 
 import { DEFAULT_API_BASE, SESSION_KEY, isInsecureBase, resolveApiBase } from "../lib/api-base";
+import SchedulesPanel from "./SchedulesPanel";
 
 type Counts = Record<string, number>;
 
@@ -87,6 +88,7 @@ export default function Graph({
   const [graphErr, setGraphErr] = useState("");
   const [loading, setLoading] = useState(false);
   const [attempt, setAttempt] = useState(0);
+  const [ghost, setGhost] = useState<Set<string>>(new Set());
   const [jitter, setJitter] = useState(false);
 
   const envBase = process.env.NEXT_PUBLIC_GITLARP_API_URL || DEFAULT_API_BASE;
@@ -290,13 +292,14 @@ export default function Graph({
         {days.map((d) => {
           const real = counts[d] ?? 0;
           const planned = plan[d] ?? 0;
+          const isGhost = ghost.has(d) && !planned;
           return (
             <button
               key={d}
               className={`cell ${level(Math.min(4, real + planned))} ${planned ? "planned" : ""} ${
-                sel === d ? "sel" : ""
-              }`}
-              title={`${d}: ${real} real + ${planned} planned`}
+                isGhost ? "ghost" : ""
+              } ${sel === d ? "sel" : ""}`}
+              title={`${d}: ${real} real + ${planned} planned${isGhost ? " + scheduled" : ""}`}
               aria-label={`${d}: ${planned} commits planned`}
               onClick={() => {
                 setSel(d);
@@ -398,6 +401,8 @@ export default function Graph({
           </button>
         )}
       </div>
+
+      {tools && <SchedulesPanel pat={pat} apiBase={apiBase} onGhostDays={setGhost} />}
 
       <p className="hint">
         click cells to set the plan (0–4 levels), then apply once
