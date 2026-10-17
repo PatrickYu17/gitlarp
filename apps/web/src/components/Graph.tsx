@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 
 import { DEFAULT_API_BASE, SESSION_KEY, isInsecureBase, resolveApiBase } from "../lib/api-base";
+import SchedulesPanel from "./SchedulesPanel";
 
 type Counts = Record<string, number>;
 
@@ -87,6 +88,8 @@ export default function Graph({
   const [graphErr, setGraphErr] = useState("");
   const [loading, setLoading] = useState(false);
   const [attempt, setAttempt] = useState(0);
+  const [ghost, setGhost] = useState<Set<string>>(new Set());
+  const [jitter, setJitter] = useState(false);
 
   const envBase = process.env.NEXT_PUBLIC_GITLARP_API_URL || DEFAULT_API_BASE;
   const resolvedBase = useMemo(
@@ -159,7 +162,7 @@ export default function Graph({
       const res = await fetch(`${apiBase}/api/commits`, {
         method: "POST",
         headers: { Authorization: `Bearer ${pat}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ pat, days: planDays }),
+        body: JSON.stringify({ pat, days: planDays, ...(jitter ? { jitter: true } : {}) }),
       });
       let body: {
         created?: number;
@@ -195,6 +198,34 @@ export default function Graph({
             setCounts(next);
           }
         }
+      }
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : String(e));
+    }
+    setBusy(false);
+  };
+
+  const resetRepo = async () => {
+    if (!window.confirm("Undo every larp commit? The default branch resets to its pre-larp state (gitlarp-base).")) return;
+    setBusy(true);
+    setMsg("");
+    try {
+      const res = await fetch(`${apiBase}/api/commits`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${pat}` },
+      });
+      let body: { kind?: string; sha?: string; branch?: string; error?: string } | null = null;
+      try {
+        body = await res.json();
+      } catch {
+        body = null;
+      }
+      if (!res.ok || !body || body.error) {
+        setMsg(body?.error ?? `reset failed (HTTP ${res.status})`);
+      } else {
+        setMsg(body.kind === "reset" ? `reset to gitlarp-base (${body.sha})` : `deleted branch ${body.branch}`);
+        setPlan({});
+        setAttempt((a) => a + 1); // refetch the graph
       }
     } catch (e) {
       setMsg(e instanceof Error ? e.message : String(e));
@@ -261,13 +292,14 @@ export default function Graph({
         {days.map((d) => {
           const real = counts[d] ?? 0;
           const planned = plan[d] ?? 0;
+          const isGhost = ghost.has(d) && !planned;
           return (
             <button
               key={d}
               className={`cell ${level(Math.min(4, real + planned))} ${planned ? "planned" : ""} ${
-                sel === d ? "sel" : ""
-              }`}
-              title={`${d}: ${real} real + ${planned} planned`}
+                isGhost ? "ghost" : ""
+              } ${sel === d ? "sel" : ""}`}
+              title={`${d}: ${real} real + ${planned} planned${isGhost ? " + scheduled" : ""}`}
               aria-label={`${d}: ${planned} commits planned`}
               onClick={() => {
                 setSel(d);
@@ -346,6 +378,15 @@ export default function Graph({
             <button disabled={busy} onClick={randomFill}>
               Random fill (into plan)
             </button>
+            <label htmlFor="gitlarp-jitter">
+              <input
+                id="gitlarp-jitter"
+                type="checkbox"
+                checked={jitter}
+                onChange={(e) => setJitter(e.target.checked)}
+              />
+              jitter times
+            </label>
           </>
         )}
         <button disabled={busy || !pat || !planCount} onClick={apply}>
@@ -354,7 +395,14 @@ export default function Graph({
         <button disabled={busy || !planCount} onClick={() => setPlan({})}>
           Clear plan
         </button>
+        {tools && (
+          <button disabled={busy || !pat} onClick={resetRepo}>
+            Reset (undo all)
+          </button>
+        )}
       </div>
+
+      {tools && <SchedulesPanel pat={pat} apiBase={apiBase} onGhostDays={setGhost} />}
 
       <p className="hint">
         click cells to set the plan (0–4 levels), then apply once
