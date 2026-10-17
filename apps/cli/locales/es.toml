@@ -19,6 +19,7 @@ usage = [
   "flags:",
   "  --force    permite fechas fuera de la ventana y hasta 1000 commits/día",
   "  --dry-run  imprime el plan sin hacer commits",
+  "  --jitter   sella los commits a una hora aleatoria del día (por defecto: 12:00 UTC)",
   "",
   "requiere: gh CLI instalado y autenticado (gh auth login)",
   "",
