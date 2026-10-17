@@ -6,7 +6,13 @@ follows Cargo's version numbers.
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- Server: integration tests for CORS preflights (204 + headers, exempt
+  from the limiter), missing-PAT 400s on the schedules routes, the run
+  endpoint's no-header 401, per-IP limiter isolation, and malformed-JSON
+  400s (audit-hardened behaviors previously covered only by the live
+  smoke tests).
 
 ## [0.3.0] - 2026-10-17
 

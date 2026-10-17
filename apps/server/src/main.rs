@@ -989,6 +989,75 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
+    // -- (c) CORS preflights -----------------------------------------------
+
+    /// Every resource answers OPTIONS with a bare 204; the CORS headers
+    /// come from the DefaultHeaders middleware wrapping every response.
+    #[actix_web::test]
+    async fn cors_preflights_answer_204_with_open_headers() {
+        let dir = temp_root();
+        let state = test_state(dir.clone(), Some("S"), None, true);
+        let app = test::init_service(build_app(state)).await;
+        for path in ["/api/commits", "/api/graph", "/api/schedules", "/api/schedules/run"] {
+            let req = TestRequest::default()
+                .method(Method::OPTIONS)
+                .uri(path)
+                .to_request();
+            let resp = test::call_service(&app, req).await;
+            assert_eq!(resp.status(), StatusCode::NO_CONTENT, "preflight {path}");
+            let headers = resp.headers();
+            assert_eq!(
+                headers.get("Access-Control-Allow-Origin").and_then(|v| v.to_str().ok()),
+                Some("*"),
+                "origin header on {path}"
+            );
+            let methods = headers
+                .get("Access-Control-Allow-Methods")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default();
+            for m in ["GET", "POST", "DELETE", "OPTIONS"] {
+                assert!(methods.contains(m), "{m} missing on {path}: {methods}");
+            }
+            let allowed = headers
+                .get("Access-Control-Allow-Headers")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default();
+            assert!(allowed.contains("Authorization"), "headers on {path}: {allowed}");
+            assert!(allowed.contains("Content-Type"), "headers on {path}: {allowed}");
+        }
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// Preflights never reach rate_guard: even with the per-IP budget
+    /// exhausted, OPTIONS still answers (a blocked preflight would
+    /// break every cross-origin browser client, not just the noisy one).
+    #[actix_web::test]
+    async fn cors_preflights_are_exempt_from_the_limiter() {
+        let dir = temp_root();
+        let state = test_state(dir.clone(), Some("S"), None, true);
+        let app = test::init_service(build_app(state)).await;
+        for i in 0..=RATE_MAX_PER_WINDOW {
+            let req = TestRequest::get()
+                .uri("/api/graph")
+                .insert_header(bearer("p1"))
+                .to_request();
+            let resp = test::call_service(&app, req).await;
+            let expected = if i < RATE_MAX_PER_WINDOW {
+                StatusCode::OK
+            } else {
+                StatusCode::TOO_MANY_REQUESTS
+            };
+            assert_eq!(resp.status(), expected, "graph call {i}");
+        }
+        let req = TestRequest::default()
+            .method(Method::OPTIONS)
+            .uri("/api/graph")
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
     // -- (d) schedules CRUD -------------------------------------------------
 
     #[actix_web::test]
@@ -1074,6 +1143,32 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
+    // -- (d) header-only PAT transport on the schedules routes --------------
+
+    #[actix_web::test]
+    async fn schedules_get_without_pat_is_400() {
+        let dir = temp_root();
+        let state = test_state(dir.clone(), Some("S"), None, true);
+        let app = test::init_service(build_app(state)).await;
+        let req = TestRequest::get().uri("/api/schedules").to_request();
+        let (status, v) = call_json(&app, req).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(v["error"], "missing pat");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[actix_web::test]
+    async fn schedules_delete_without_pat_is_400() {
+        let dir = temp_root();
+        let state = test_state(dir.clone(), Some("S"), None, true);
+        let app = test::init_service(build_app(state)).await;
+        let req = TestRequest::delete().uri("/api/schedules?id=x").to_request();
+        let (status, v) = call_json(&app, req).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(v["error"], "missing pat");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
     #[actix_web::test]
     async fn schedules_undecryptable_record_renders_broken() {
         let dir = temp_root();
@@ -1122,6 +1217,21 @@ mod tests {
             .uri("/api/schedules/run")
             .insert_header(bearer("wrong"))
             .to_request();
+        let (status, v) = call_json(&app, req).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(v["error"], "invalid bearer token");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// No Authorization header at all is the same 401 as a wrong
+    /// bearer: the empty compare must not leak a distinction (an empty
+    /// string is never equal to a configured secret).
+    #[actix_web::test]
+    async fn run_rejects_missing_header_with_401() {
+        let dir = temp_root();
+        let state = test_state(dir.clone(), Some("S"), None, true);
+        let app = test::init_service(build_app(state)).await;
+        let req = TestRequest::post().uri("/api/schedules/run").to_request();
         let (status, v) = call_json(&app, req).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
         assert_eq!(v["error"], "invalid bearer token");
@@ -1311,6 +1421,44 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
+    /// Buckets are per peer address: exhausting one IP's budget must
+    /// not touch another peer's (needs `TestRequest::peer_addr`,
+    /// available since actix-web 4.0).
+    #[actix_web::test]
+    async fn limiter_buckets_are_isolated_per_peer_address() {
+        let dir = temp_root();
+        let state = test_state(dir.clone(), Some("S"), None, true);
+        let app = test::init_service(build_app(state)).await;
+        let addr = |ip: &str| -> std::net::SocketAddr { format!("{ip}:1").parse().unwrap() };
+        // exhaust 10.0.0.1's budget (each call resolves the user, finds no schedule -> 404)
+        for i in 0..RATE_MAX_PER_WINDOW {
+            let req = TestRequest::delete()
+                .uri("/api/schedules?id=x")
+                .insert_header(bearer("p1"))
+                .peer_addr(addr("10.0.0.1"))
+                .to_request();
+            let resp = test::call_service(&app, req).await;
+            assert_eq!(resp.status(), StatusCode::NOT_FOUND, "call {i} under the limit");
+        }
+        // same peer is now over the limit
+        let req = TestRequest::delete()
+            .uri("/api/schedules?id=x")
+            .insert_header(bearer("p1"))
+            .peer_addr(addr("10.0.0.1"))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        // a different peer is untouched by 10.0.0.1's flood
+        let req = TestRequest::delete()
+            .uri("/api/schedules?id=x")
+            .insert_header(bearer("p1"))
+            .peer_addr(addr("10.0.0.2"))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
     /// healthz must stay exempt from the limiter even after graph has
     /// exhausted the per-IP budget.
     #[actix_web::test]
@@ -1387,6 +1535,24 @@ mod tests {
             .to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// Malformed JSON stays in the `{"error": ...}` shape via the
+    /// JsonConfig error handler, not actix's default plain-text body.
+    #[actix_web::test]
+    async fn malformed_json_body_is_400_with_error_shape() {
+        let dir = temp_root();
+        let state = test_state(dir.clone(), Some("S"), None, true);
+        let app = test::init_service(build_app(state)).await;
+        let req = TestRequest::post()
+            .uri("/api/commits")
+            .insert_header(("content-type", "application/json"))
+            .set_payload("{oops")
+            .to_request();
+        let (status, v) = call_json(&app, req).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(v.get("error").is_some(), "expected error shape, got: {v}");
         std::fs::remove_dir_all(dir).ok();
     }
 
